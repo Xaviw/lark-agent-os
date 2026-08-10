@@ -21,7 +21,7 @@ export type PiModelOption = {
   name: string;
 };
 
-export type PiEffort = Parameters<AgentSession['setThinkingLevel']>[0];
+export type PiThinkingLevel = Parameters<AgentSession['setThinkingLevel']>[0];
 
 function latestAssistantError(session: AgentSession, beforeMessageIds: ReadonlySet<string>): string | undefined {
   const entry = [...session.sessionManager.getEntries()]
@@ -33,13 +33,15 @@ function latestAssistantError(session: AgentSession, beforeMessageIds: ReadonlyS
 }
 
 const piStatusEnabled = process.env.LARK_PI_STATUS_ENABLED?.trim().toLowerCase() !== 'false';
-const piAutoCompaction = process.env.LARK_PI_STATUS_AUTO_COMPACTION?.trim().toLowerCase() !== 'false';
 
 export class PiSessions {
   private readonly sessions = new Map<string, AgentSession>();
   private readonly modelRuntimePromise = ModelRuntime.create();
+  private readonly backgroundTaskCountProvider: () => number;
 
-  constructor(private readonly state: StateStore) {}
+  constructor(private readonly state: StateStore, backgroundTaskCountProvider?: () => number) {
+    this.backgroundTaskCountProvider = backgroundTaskCountProvider ?? (() => 0);
+  }
 
   async list(cwd: string): Promise<SessionInfo[]> {
     return SessionManager.list(cwd);
@@ -76,7 +78,7 @@ export class PiSessions {
       if (error) throw new Error(error);
       return {
         answer: answer.trim() || '（Agent 没有返回文本）',
-        status: this.statusFor(session),
+        status: this.statusFor(session, this.backgroundTaskCountProvider()),
       };
     } finally {
       unsubscribe();
@@ -105,14 +107,14 @@ export class PiSessions {
     return { provider: model.provider, id: model.id, name: model.name ?? model.id };
   }
 
-  async efforts(chatId: string, cwd: string, sessionFile: string): Promise<PiEffort[]> {
+  async thinkingLevels(chatId: string, cwd: string, sessionFile: string): Promise<PiThinkingLevel[]> {
     return (await this.getOrOpen(chatId, cwd, sessionFile)).getAvailableThinkingLevels();
   }
 
-  async setEffort(chatId: string, cwd: string, sessionFile: string, effort: PiEffort): Promise<void> {
+  async setThinkingLevel(chatId: string, cwd: string, sessionFile: string, thinkingLevel: PiThinkingLevel): Promise<void> {
     const session = await this.getOrOpen(chatId, cwd, sessionFile);
-    if (!session.getAvailableThinkingLevels().includes(effort)) throw new Error('当前 model 不支持该思考强度。');
-    session.setThinkingLevel(effort);
+    if (!session.getAvailableThinkingLevels().includes(thinkingLevel)) throw new Error('当前 model 不支持该思考强度。');
+    session.setThinkingLevel(thinkingLevel);
   }
 
   async rename(chatId: string, cwd: string, sessionFile: string, name: string): Promise<void> {
@@ -126,7 +128,7 @@ export class PiSessions {
 
   async status(chatId: string, cwd: string, sessionFile: string): Promise<string | undefined> {
     if (!piStatusEnabled) return undefined;
-    return this.statusFor(await this.getOrOpen(chatId, cwd, sessionFile));
+    return this.statusFor(await this.getOrOpen(chatId, cwd, sessionFile), this.backgroundTaskCountProvider());
   }
 
   async statusAt(cwd: string, sessionFile: string, entryId: string): Promise<string | undefined> {
@@ -152,7 +154,7 @@ export class PiSessions {
     }
   }
 
-  private statusFor(session: AgentSession): string | undefined {
+  private statusFor(session: AgentSession, backgroundCount = 0): string | undefined {
     if (!piStatusEnabled) return undefined;
     const stats = session.getSessionStats();
     const latestAssistant = [...session.sessionManager.getEntries()]
@@ -174,7 +176,8 @@ export class PiSessions {
     const context = stats.contextUsage;
     const contextWindow = context?.contextWindow ?? 0;
     const percent = context?.percent === null ? '?' : (context?.percent ?? 0).toFixed(1);
-    parts.push(`${percent}%/${formatPiTokens(contextWindow)}${piAutoCompaction && session.autoCompactionEnabled ? ' (auto)' : ''}`);
+    parts.push(`${percent}%/${formatPiTokens(contextWindow)}${session.autoCompactionEnabled ? ' (auto)' : ''}`);
+    if (backgroundCount > 0) parts.push(`后台任务 ×${backgroundCount}`);
     return parts.join(' ');
   }
 

@@ -96,22 +96,18 @@ export function modelPickerCard(models: PiModelOption[], nonce: string): object 
   };
 }
 
-export function effortPickerCard(efforts: string[], nonce: string): object {
+export function thinkingLevelPickerCard(thinkingLevels: string[], nonce: string): object {
   return {
     schema: '2.0',
     config: { summary: { content: '选择思考强度' } },
     body: { elements: [
       { tag: 'markdown', content: '**选择当前 model 的思考强度**' },
-      ...efforts.map((effort) => ({
-        tag: 'button', text: { tag: 'plain_text', content: effort }, type: 'primary',
-        behaviors: [{ type: 'callback', value: { cmd: 'effort.select', nonce, effort } }],
+      ...thinkingLevels.map((thinkingLevel) => ({
+        tag: 'button', text: { tag: 'plain_text', content: thinkingLevel }, type: 'primary',
+        behaviors: [{ type: 'callback', value: { cmd: 'thinkingLevel.select', nonce, thinkingLevel } }],
       })),
     ] },
   };
-}
-
-export function statusCard(text: string): object {
-  return { config: { wide_screen_mode: true }, elements: [{ tag: 'markdown', content: text }] };
 }
 
 export function agentQueuedCard(taskId: string, prompt: string): object {
@@ -135,26 +131,28 @@ export function agentFinalCard(title: string, content: string, status?: string, 
 }
 
 export function helpCard(cwd: string, bound: boolean, hasSession: boolean): object {
-  const bindingStatus = bound ? '' : '\n\n此群尚未绑定项目。可创建新的项目群。';
-  const sessionStatus = hasSession ? '' : '\n\n尚未选择 Session，请使用 new 或 resume。';
-  const button = (label: string, cmd: string, type: 'primary' | 'default' = 'default') => ({ tag: 'button', text: { tag: 'plain_text', content: label }, type, behaviors: [{ type: 'callback', value: { cmd } }] });
+  const bindingStatus = bound ? '' : '\n\n此群尚未绑定项目，请先绑定。';
+  const sessionStatus = hasSession ? '' : '\n\n尚未选择 Session，请使用「新建会话」或「切换会话」。';
+  const button = (label: string, cmd: string) => ({ tag: 'button', text: { tag: 'plain_text', content: label }, type: 'primary', behaviors: [{ type: 'callback', value: { cmd } }] });
   return {
     schema: '2.0', config: { summary: { content: 'lark-agent-os 操作面板' } }, body: { elements: [
       { tag: 'markdown', content: `**当前工作路径**\n\`${cwd}\`${bindingStatus}${sessionStatus}` }, { tag: 'hr' },
       { tag: 'column_set', flex_mode: 'flow', columns: [
-        { tag: 'column', width: 'auto', elements: [button('model', 'model.form', 'primary')] },
-        { tag: 'column', width: 'auto', elements: [button('effort', 'effort.form', 'primary')] },
-        { tag: 'column', width: 'auto', elements: [button('name', 'session.rename.form')] },
+        { tag: 'column', width: 'auto', elements: [button('切换模型', 'model.form')] },
+        { tag: 'column', width: 'auto', elements: [button('切换思考强度', 'thinkingLevel.form')] },
+        { tag: 'column', width: 'auto', elements: [button('重命名会话', 'session.rename.form')] },
       ] },
       { tag: 'column_set', flex_mode: 'flow', columns: [
-        { tag: 'column', width: 'auto', elements: [button('new', 'session.new.form', 'primary')] },
-        { tag: 'column', width: 'auto', elements: [button('compact', 'session.compact')] },
-        { tag: 'column', width: 'auto', elements: [button('resume', 'session.resume.form', 'primary')] },
-        { tag: 'column', width: 'auto', elements: [button('sync', 'session.sync.form', 'primary')] },
+        { tag: 'column', width: 'auto', elements: [button('新建会话', 'session.new.form')] },
+        { tag: 'column', width: 'auto', elements: [button('压缩会话', 'session.compact')] },
+        { tag: 'column', width: 'auto', elements: [button('切换会话', 'session.resume.form')] },
+        { tag: 'column', width: 'auto', elements: [button('同步消息', 'session.sync.form')] },
       ] }, { tag: 'hr' },
       { tag: 'column_set', flex_mode: 'flow', columns: [
         { tag: 'column', width: 'auto', elements: [button('执行命令', 'command.form')] },
         { tag: 'column', width: 'auto', elements: [button('创建项目群', 'project.create.form')] },
+        { tag: 'column', width: 'auto', elements: [button('绑定项目', 'project.bind.form')] },
+        { tag: 'column', width: 'auto', elements: [button('后台任务', 'bgTask.form')] },
       ] },
     ] },
   };
@@ -165,7 +163,8 @@ export function commandFormCard(cwd: string): object {
     { tag: 'markdown', content: `**执行命令**\n\n工作路径：\`${cwd}\`` },
     { tag: 'form', name: 'command_form', elements: [
       { tag: 'input', name: 'command', label: { tag: 'plain_text', content: '命令' }, placeholder: { tag: 'plain_text', content: 'pnpm test' }, required: true },
-      { tag: 'input', name: 'timeoutSeconds', label: { tag: 'plain_text', content: '超时（秒，可选）' }, placeholder: { tag: 'plain_text', content: '留空则不自动停止' } },
+      { tag: 'input', name: 'timeoutSeconds', label: { tag: 'plain_text', content: '超时（秒，可选）' }, placeholder: { tag: 'plain_text', content: '默认 10 秒，可修改或清空（清空则不自动停止）' }, default_value: '10' },
+      { tag: 'checker', name: 'isBackground', label: { tag: 'plain_text', content: '常驻任务（忽略超时，后台持续运行）' }, checked: false },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '执行' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'command.submit' } }] },
     ] },
   ] } };
@@ -173,18 +172,15 @@ export function commandFormCard(cwd: string): object {
 
 export function commandStartingCard(command: string, cwd: string, timeoutSeconds?: number): object {
   const timeout = timeoutSeconds ? `\n超时：${timeoutSeconds} 秒` : '';
-  return { schema: '2.0', config: { summary: { content: '命令正在启动' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**命令正在启动**\n\n\`$ ${command}\`\n工作路径：\`${cwd}\`${timeout}`) }] } };
+  return { schema: '2.0', config: { summary: { content: '命令正在启动' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**命令正在启动**\n\n\`$ ${escapeCommand(command)}\`\n工作路径：\`${cwd}\`${timeout}`) }] } };
 }
 
 export function commandRunningCard(taskId: string, command: string, cwd: string, timeoutSeconds?: number, output?: string): object {
   const timeout = timeoutSeconds ? `\n超时：${timeoutSeconds} 秒` : '';
   const latestOutput = output ? `\n\n${output.slice(-8_000)}` : '';
   return { schema: '2.0', config: { summary: { content: '命令正在执行' } }, body: { elements: [
-    { tag: 'markdown', content: limitedMarkdown(`**命令正在执行**\n\n\`$ ${command}\`\n工作路径：\`${cwd}\`\n状态：执行中${timeout}${latestOutput}`) },
-    { tag: 'column_set', flex_mode: 'flow', columns: [
-      { tag: 'column', width: 'auto', elements: [{ tag: 'button', text: { tag: 'plain_text', content: '查看输出' }, behaviors: [{ type: 'callback', value: { cmd: 'command.output', taskId } }] }] },
-      { tag: 'column', width: 'auto', elements: [{ tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'command.stop', taskId } }] }] },
-    ] },
+    { tag: 'markdown', content: limitedMarkdown(`**命令正在执行**\n\n\`$ ${escapeCommand(command)}\`\n工作路径：\`${cwd}\`\n状态：执行中${timeout}${latestOutput}`) },
+    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'command.stop', taskId } }] },
   ] } };
 }
 
@@ -199,6 +195,41 @@ export function createProjectFormCard(baseCwd: string): object {
       { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '群名称' }, placeholder: { tag: 'plain_text', content: 'Pi · 项目名称' } },
       { tag: 'input', name: 'cwd', label: { tag: 'plain_text', content: '工作路径' }, placeholder: { tag: 'plain_text', content: '~/Codes/my-project 或 ../my-project' }, required: true },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '创建项目群' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'project.create.submit', baseCwd } }] },
+    ] },
+  ] } };
+}
+
+export function bgTaskListCard(tasks: Array<{ id: string; command: string; startedAt: number }>): object {
+  const header = tasks.length === 0
+    ? { tag: 'markdown', content: '**后台任务**\n\n当前没有后台任务。' }
+    : { tag: 'markdown', content: `**后台任务（${tasks.length}）**\n\n${tasks.map((task) => `\`$ ${escapeCommand(task.command)}\`\n启动时间：${formatTimestamp(task.startedAt)}`).join('\n\n')}` };
+  const stopButtons = tasks.map((task) => {
+    const label = task.command.length > 16 ? `${task.command.slice(0, 16)}…` : task.command;
+    return { tag: 'button', text: { tag: 'plain_text', content: `停止：${label}` }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'bgTask.stop', taskId: task.id } }] };
+  });
+  return { schema: '2.0', config: { summary: { content: '后台任务' } }, body: { elements: [header, ...(stopButtons.length > 0 ? [{ tag: 'hr' }, ...stopButtons] : [])] } };
+}
+
+/** 命令转义：防止用户输入的反引号 / 换行破坏卡片 markdown 渲染 */
+export function escapeCommand(command: string): string {
+  return command.replace(/`/g, '\\`').replace(/[\r\n]+/g, ' ').trim();
+}
+
+/** 时间格式化：兼容 number / string / 非法值（非法时显示占位） */
+export function formatTimestamp(timestamp: unknown): string {
+  const date = new Date(typeof timestamp === 'string' || typeof timestamp === 'number' ? timestamp : NaN);
+  if (Number.isNaN(date.getTime())) return '??-??-?? ??:??:??';
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${String(date.getFullYear()).slice(-2)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+export function bindProjectFormCard(baseCwd: string, bound: boolean): object {
+  const title = bound ? '修改绑定' : '绑定项目';
+  return { schema: '2.0', config: { summary: { content: title } }, body: { elements: [
+    { tag: 'markdown', content: `**${title}**\n\n将当前群绑定到工作路径。相对路径将以当前工作路径 \`${baseCwd}\` 为基准；支持绝对路径和 \`~/...\`。` },
+    { tag: 'form', name: 'project_bind_form', elements: [
+      { tag: 'input', name: 'cwd', label: { tag: 'plain_text', content: '工作路径' }, placeholder: { tag: 'plain_text', content: '~/Codes/my-project 或 ../my-project' }, required: true },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: bound ? '保存绑定' : '绑定项目' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'project.bind.submit', baseCwd } }] },
     ] },
   ] } };
 }

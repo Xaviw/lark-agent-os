@@ -1,7 +1,120 @@
-# Agent 注意事项
+# AGENTS.md（lark-agent-os）
 
-## 重启 lark-agent-os
+面向 coding agent 的项目上下文与操作说明。人类文档见 `README.md`；功能目标态见 `PRD.md`。
 
-不要在由同一个 `lark-agent-os` 进程处理的飞书 Agent 请求中执行 `kill -TERM <lark-agent-os-pid>`。服务进入关闭流程后会中止所有正在执行的 Agent run，其中包括正在执行该命令的当前请求，导致 pi 报错：`Error: This operation was aborted`。
+## 项目概览
 
-应在当前 Agent 请求完成后，从外部终端重启服务。如必须以编程方式触发重启，应先启动一个脱离旧服务进程组的 supervisor，再停止服务；该 supervisor 应等待旧 PID 退出后再启动新实例。
+- **定位**：国内版飞书（`open.feishu.cn`）× pi coding agent 的网关。飞书群聊 / 私聊消息交给 pi 处理，卡片完成会话 / 模型 / 命令 / 项目群操作。
+- **技术栈**：Node.js ≥ 22.19 / TypeScript（strict）/ pnpm；`@larksuite/channel`（飞书 WebSocket 接入）、`@earendil-works/pi-coding-agent`（pi SDK）、`dotenv`。
+- **单进程模型**：入口 `src/main.ts`（约 110 行）为唯一组装点；启动时校验必填 env → 加载 state → 获取单实例锁 → 装配 AppContext → 连接飞书 → reconcile → 刷新公告。业务逻辑按域拆分到独立模块（见下表）。
+
+## 开发命令与验证
+
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm dev` | tsx 直接运行 `src/main.ts`（需 `LARK_APP_ID` / `LARK_APP_SECRET`，会真实连接飞书） |
+| `pnpm dev:watch` | 热重载运行 |
+| `pnpm typecheck` | `tsc --noEmit`，**每次改动后必须通过** |
+| `pnpm build` | 编译到 `dist/`（`noEmitOnError`） |
+| `pnpm start` | 运行 `dist/main.js` |
+
+- **无测试框架 / 无 lint 脚本**。验证手段：
+  1. `pnpm typecheck` + `pnpm build`；
+  2. 纯逻辑（如 `selectSyncTurns`、`truncateSyncBody`、节流、卡片构建）用**临时 tsx 脚本**直接 import 项目模块验证边界，通过后删除，不留项目内；注意 `config.ts` 顶层会解析 env（缺 `LARK_APP_ID` 抛错），脚本需先设 `LARK_APP_ID` / `LARK_APP_SECRET` 再动态 import（ESM 静态 import 先于赋值执行）；
+  3. 端到端需真实飞书凭据，无法在本地自动验证——依赖上一步的逻辑测试 + 仔细的代码审查。
+- 抽纯函数便于验证：把副作用（state/lark 调用）与决策逻辑分离（参考 `selectSyncTurns` 模式）。纯函数模块（`sync/select-turns.ts` / `sync/truncate.ts` / `utils/format.ts`）不依赖 state / lark，可独立 import 验证。
+
+## 架构与模块
+
+按「模块化单体 + 单一组装点」组织：`main.ts` 只做装配，业务按域拆分。共享依赖通过 `AppContext`（`src/app-context.ts`）传递；`AgentRunManager` ↔ `SessionSyncWatcher` 的交叉引用由 main.ts 组装点 `attach` 注入打破循环依赖。
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/main.ts` | 唯一组装点：启动引导、ctx 装配 + attach、事件接线、shutdown、单实例锁（约 110 行） |
+| `src/config.ts` | env 解析（`LARK_*`）+ 业务常量（`*_LIMIT` / `*_INTERVAL_MS` / `SYNC_*`） |
+| `src/app-context.ts` | `AppContext` 类型：全局共享依赖（state / pi / api / lark / 任务容器 / agentRuns / sessionSyncWatcher） |
+| `src/types.ts` | 共享类型（`ChatBinding` / `SessionSyncState` / `AgentRun` / `CommandTask` / `BackgroundTask` / `ComputerTurn` 等） |
+| `src/pi.ts` | `PiSessions`：pi SDK 封装（prompt / abort / models / thinkingLevel / rename / compact / status / statusAt）；`statusFor` 状态栏；构造可注入 `backgroundTaskCountProvider` |
+| `src/cards.ts` | 全部飞书卡片 schema（JSON 2.0：help / 表单 / 选择器 / 状态卡 / `bgTaskListCard`） |
+| `src/state.ts` | `StateStore`：state.json 原子写入（tmp + rename、串行 flush）、旧字段迁移 |
+| `src/lark-api.ts` | tenant token 缓存 + 群公告 Docx API |
+| `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡） |
+| `src/agent/prompt.ts` | `runPrompt` / `promptWithReplyContext` / `useNewSession`（引用消息上下文、飞书来源标记） |
+| `src/commands/shell.ts` | 命令执行（`$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`） |
+| `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `sessionEntryIds` / `extractText`（纯函数） |
+| `src/sync/select-turns.ts` | `selectSyncTurns`：方案 B 轮次选择（纯函数） |
+| `src/sync/truncate.ts` | `truncateSyncBody`：28KB 字节截断（纯函数） |
+| `src/sync/sync-service.ts` | `syncComputerSessions` / `ensureAutoBaseline` / `markFeishuOrigin` / `workspaceForChat` |
+| `src/sync/watcher.ts` | `SessionSyncWatcher`：fs.watch + 轮询 + 防抖 + 退避（电脑端 → 飞书单向同步） |
+| `src/lark/messages.ts` | `handleMessage` + 私聊绑定 / 项目创建 / help / session 选择卡 |
+| `src/lark/card-actions.ts` | `handleCardAction`：全部 cmd 分支 + 表单解析（`cardFormValue` / `cardFormFlag` / toast / `parseCommandTimeout`） |
+| `src/announcement.ts` | 群公告 Docx 更新 + session 元数据读取 |
+| `src/utils/card-update.ts` | `createCardUpdater` / `updateCardWithRetry` / `createThrottledUpdate` |
+| `src/utils/format.ts` | `commandOutputMarkdown` / `elapsedSince` / `agentFailureContent` / `defaultProjectName` / `resolveWorkspacePath`（纯函数） |
+
+## 关键机制（代码事实，维护时勿偏离）
+
+- **卡片交互**：全部为 JSON 2.0（`schema: '2.0'`）。按钮 `behaviors: [{ type: 'callback', value: { cmd, ... } }]`；表单用 `form` 容器 + `input` / `checker`（V7.9+）。`cardFormValue` 只取 string 值并 trim；布尔字段（checker）用 `cardFormFlag` 单独读取。卡片操作带 `nonce` 防过期。
+- **卡片更新**：`createCardUpdater`（pending + 单飞队列串行化 + 失败重试一次）；**事件驱动节流**（750ms，非轮询）——agent 预览与命令输出共用该模式（`createThrottledUpdate`）。内容限制：卡片 6000 字符（`limitedMarkdown` 头 1/3 + 尾），命令输出内存 30KB。
+- **Agent 队列状态机**：每群串行 `queued → running → succeeded / failed / cancelled`（含 `stopping`）；停止过渡卡带 `run.latestOutput`；`inFlightFeishuRun` 记录飞书来源轮次，结束后 `markFeishuOrigin` 即时标记。
+- **命令执行**：`$SHELL -lc` 于群绑定 cwd；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
+- **会话同步（方向不对称）**：
+  - 电脑端 → 飞书：`SessionSyncWatcher`（fs.watch + 60s 轮询 + 750ms 防抖 + 双 stat 校验 + 指数退避 ≤3 次）单向推送；
+  - 飞书 → 电脑端：**无推送**，pi SDK 直接写共享 session JSONL，电脑端 resume 可见；
+  - 防回环（方案 B）：`selectSyncTurns` 把飞书轮次视为已消费并推进进度，`feishuOriginEntryIds` 消费即清理（O(1)，`slice(-1000)` 仅兜底）；
+  - 超长：同步消息体按 **28KB（UTF-8 字节）** 截断 + 说明（飞书富文本上限 30KB，错误码 230025）。
+- **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护。
+- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / announcementRevision / updatedAt`。
+- **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试。
+
+## 命名与代码约定
+
+- **交流、文档、注释一律简体中文**；标识符 / 错误消息用中文也可，但 `cmd` 值、env 名、字段名保持英文。
+- 思考强度用 `thinkingLevel`（**绝不用 `effort`**）。
+- `cmd` 命名：`<域>.<动作>`（如 `project.bind.submit`、`session.compact`）；按钮显示文本中文、`cmd` 不变。
+- 环境变量：`LARK_APP_ID` / `LARK_APP_SECRET`（必填）、`LARK_DEFAULT_WORKSPACE`（默认进程 cwd）、`LARK_STATE_DIR`（默认 `.state`）、`LARK_PI_STATUS_ENABLED`（默认 true）、`LARK_PI_RETRY_MAX_RETRIES`（默认 3）。已删除 `LARK_PI_STATUS_AUTO_COMPACTION`，勿再引入。
+- 常量集中在 `src/config.ts`（`*_LIMIT`、`*_INTERVAL_MS`、`SYNC_*` 等）；env 解析也在此（顶层求值，import 即校验必填项）。
+
+## 文档工作流（重要）
+
+- **新需求 / 改动**：先与用户讨论方案、确认后再实施，**不直接改代码**；用户明确指示实施时才改。
+- **探索型任务**（如飞书组件能力验证）：由 agent 自行验证（查文档、写临时脚本），无需等用户确认。
+- `PRD.md` 为功能目标态规格，随实现同步更新；文档描述必须以**代码事实**为准（如同步方向不对称、`(auto)` 标记固定跟随 session 设置）。
+
+## 批量实施经验
+
+1. **改前做区域关联分析**：多条改动共享代码区域时（如 helpCard 按钮行被 #1/#2/#3/#8 共用、`syncComputerSessions` 被 #10/#11 共用、`runShellCommand` 被 #8/#9 共用），先按区域合并/拆分批次——同区域一次改完，避免反复编辑与互相覆盖。
+2. **edit 多块是原子应用**：一次调用中任一 `oldText` 不匹配则**整体失败**，失败后易漏改其他块（本次曾因此残留 `command.output` 分支直到 grep 才发现）。改完必须 grep 验证关键标记（被删除的分支名、新增关键词/常量）确认真正生效。
+3. **oldText 唯一性**：同一文本出现多处时（如 `const binding = state.get(event.chatId);` 在 main.ts 出现两次）加长上下文；同一调用内两个 edit 的 `oldText` 不得重叠/嵌套。
+4. **核心逻辑 review 边界分支**：涉及进度推进 / 消费 / 截断 / 分组取舍的逻辑，改完检查空集、全排除、单元素等路径（本次方案 B 曾把进度推进写进“有发送”分支，导致纯飞书轮次被排除时进度不推进——review 时发现并移出发送分支）。
+5. **复杂算法先写临时边界测试**：用临时 tsx 脚本验证边界（多字节字符切分、临界字节、突发节流、空态、交错轮次），通过后删除脚本；断言要基于**需求语义**（如 auto = 最新电脑端轮次，而非“最新轮”）。副作用与决策分离成纯函数（如 `selectSyncTurns`、`truncateSyncBody`）以便独立测试。
+6. **清理要成对**：移除清单类文档的条目时同步插入归档记录；收尾时 `grep -n "^## "` 核对标题完整性（曾漏删正文条目，收尾才统一清理）。
+7. **含反引号的归档片段**：用临时文件 + node 拼接写入，避免 shell 模板字符串转义问题。
+
+## 飞书相关文档探索策略
+
+1. **本地优先（权威）**：`node_modules/@larksuite/channel/dist/index.d.mts` 是 `LarkChannel` API 的类型权威——`send / updateCard / createChat / fetchMessage / disconnect` 的签名、`NormalizedMessage`（`chatId / chatType / content / mentionedBot / senderId / replyToMessageId`）、`CardActionEvent`（`action.value / action.formValue / operator / raw`）。`node_modules/@larksuite/channel/README.zh.md` 有中文说明。
+2. **在线文档**：飞书开放平台 `https://open.feishu.cn/document/`（**仅国内版，勿用国际版 open.larksuite.com**）。网络受限时先设代理：`$env:HTTP_PROXY="http://127.0.0.1:7897"; $env:HTTPS_PROXY="http://127.0.0.1:7897"`，仍失败则暂停并向用户反馈。
+3. **已踩过的关键限制（务必记住）**：
+   - 消息体上限：文本 150KB、**富文本 post / 卡片 30KB**，超限错误码 **230025**；
+   - 卡片 JSON 2.0 组件：`form / input / button / checker / column_set / hr / markdown`；**checker 需客户端 V7.9+**；
+   - 群公告 Docx：block_type 1=page、2=text；`createAnnouncementTextBlock / pinAnnouncement / updateAnnouncement / announcementBlocks`；
+   - WebSocket 长连接接入，无需 webhook。
+4. **新增 API / 卡片字段时**：先查类型定义确认签名 → 字段语义不明再查在线文档（可用 `fetch_content` 抓取）→ 用临时脚本验证 schema 结构 → 注意错误码与国内版域名差异。
+
+## pi 相关文档探索策略
+
+1. **本地优先（权威）**：
+   - SDK 包：`node_modules/@earendil-works/pi-coding-agent/` 的 `README.md`、`docs/`（`sdk.md`、`models.md`、`packages.md`、`compaction.md`、`custom-provider.md`、`environment-variables.md` 等）、`dist/index.d.ts`（`AgentSession` / `SessionManager` / `ModelRuntime` 类型签名）。
+   - 项目内封装：`src/pi.ts` 已提炼全部常用操作（prompt / abort / models / setModel / thinkingLevels / setThinkingLevel / rename / compact / status / statusAt / create / ensure / dispose），改交互前先读它。
+2. **pi 工具本体文档**（查 pi 自身功能时）：系统安装位置 `C:\Users\70446\AppData\Local\mise\installs\npm-earendil-works-pi-coding-agent\0.84.1\node_modules\.mise\@earendil-works+pi-coding-agent@0.84.1\node_modules\@earendil-works\pi-coding-agent\`（`README.md` + `docs/`，含 sdk / models / packages / custom-provider 等）。
+3. **session JSONL 格式**：entry `type` 含 `session` / `message` / `model_change` / `thinking_level_change` / `compaction` 等；`message` 有 `role / content / stopReason / errorMessage / usage`；解析与轮次划分参考 `main.ts` 的 `sessionBranchEntries` / `completedComputerTurns` / `readSessionMetadata`。
+4. **常见 API 速查**：`SessionManager.open(file, undefined, cwd)` / `create` / `list` / `getBranch` / `getEntries` / `appendSessionInfo`；`AgentSession.prompt / abort / compact / setModel / setThinkingLevel / getAvailableThinkingLevels / sessionManager / subscribe / dispose`；`ModelRuntime.create().getAvailable()`；状态栏口径见 `statusFor`（`getSessionStats` + `autoCompactionEnabled`）。
+5. **验证**：pi 的行为（如 compact 中止运行中任务）为 SDK 既定行为，探索时以类型定义 + 文档为准，必要时写临时脚本实测，避免臆测。
+
+## 运维与注意事项
+
+- **重启警告（重要）**：不要在由同一个 `lark-agent-os` 进程处理的飞书 Agent 请求中执行 `kill -TERM <lark-agent-os-pid>`——服务进入关闭流程后会中止所有正在执行的 Agent run（含当前请求），导致 `Error: This operation was aborted`。应在当前 Agent 请求完成后，从**外部终端**重启服务；如必须以编程方式触发重启，应先启动一个脱离旧服务进程组的 supervisor，再停止服务；supervisor 等待旧 PID 退出后再启动新实例。
+- 排查：关键路径日志前缀 `[agent run]` / `[command]` / `[session sync]` / `[announcement]` / `[session watch]` / `[compact]` / `[cardAction]`；状态看 `.state/state.json`；锁文件残留（进程已死）会自动清理。
+- shutdown 流程：终止 commandTasks + backgroundTasks → 关 watcher → 停止 agent（1.5s 内发「服务正在关闭」卡）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
+- 已知边界：Windows 下进程组终止退化为单进程 kill；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志。
