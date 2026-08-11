@@ -34,6 +34,7 @@
 - 机器人自身消息不处理（防自触发）。
 - 消息类型分流（依据 `rawContentType`）：`text` / `post` / `interactive` 按文本处理；`sticker` 静默忽略；`image` / `file` / `audio` / `video` 不直接进入 agent，回复轻提示「已收到 ✅ 引用（回复）该文件并附上需求，即可让我处理」，用户「引用（回复）」该消息并附文字后处理（见「引用附件」）。
 - 群未绑定项目 → 回复"该群尚未绑定项目，请使用 `/help` 中的「绑定项目」"。
+- 话题窗口（thread）消息：事件 `chat_id` 与原会话相同、额外带 `thread_id`。话题消息优先走**话题独立 session**（见「话题窗口（thread）」），不依赖主会话 activeSessionFile（主会话未选 Session 不影响话题）。
 
 **`/help` 操作面板**
 
@@ -45,7 +46,7 @@
 | 2 | 新建会话 `session.new.form` · 压缩会话 `session.compact` · 切换会话 `session.resume.form` · 同步消息 `session.sync.form` |
 | 3 | 执行命令 `command.form` · 创建项目群 `project.create.form` · 绑定项目 `project.bind.form` · 后台任务 `bgTask.form` |
 
-- 提示语：未绑定群 →"此群尚未绑定项目，请先绑定。"；已绑定未选 Session →"请使用"新建会话"或"切换会话"。"
+- 提示语：未绑定群 →"此群尚未绑定项目，请先绑定。"；已绑定未选 Session →"请使用"新建会话"或"切换会话"。"（话题模式不显示绑定 / Session 提示，按钮裁剪见「话题窗口（thread）」）
 
 **Agent 队列与状态机**
 
@@ -63,6 +64,16 @@
 - 注入分级：`image/*` 且 ≤10MB 且当前模型支持视觉输入（Model.input 含 image）→ 以 base64 图片附件随 prompt 注入（模型可直接查看）；其余（含超限 / 不支持视觉的图片）→ 注入文件名、大小、mime、本地路径，由 agent 自行读取（会话默认启用 read / bash 等工具）。
 - 获取失败（`fetchMessage` 抛错）或内容为空 → **不进入 agent 流程**（不建 run、不设 `inFlightFeishuRun`），以 markdown 回复固定原因「无法读取被引用的消息。」（错误码 1069307 无权限时给专门提示），内部错误详情只进日志。
 - 边界：引用消息过长时注入截断版本并标注。
+
+**话题窗口（thread）**
+
+- 飞书「创建话题」后，话题窗口中的消息事件与原会话共享 `chat_id`、额外带 `thread_id`；话题窗口不是独立 chat，但对话归属**独立 session**（不 fork、不继承主会话历史）。
+- **懒初始化**：话题内首次 `@bot`（群）/ 任意消息（私聊）时自动新建 session（命名 `话题-MM-DD HH:mm`，电脑端 pi 列表可见）并绑定 `threadId`；之后话题内对话持续写入该 session，与主会话完全隔离（不写入主会话、不依赖主会话已选 Session）。同一 threadId 并发首条消息只创建一次（in-flight 守卫 + 双检）；多个话题各自独立 session；不同群可存在相同 threadId（按 chatId 隔离）。
+- 触发规则沿用原会话：群话题内须 `@bot`（`/help` 免 `@`）；私聊话题免 `@`。话题内 `@bot` 而群未绑定项目 → 仍提示先绑定。
+- **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 命令 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩）作用于**话题 session** 而非主会话。
+- **公告**：话题内不触发群公告（懒初始化建会话、切换模型、设置思考强度、重命名均跳过公告刷新）；话题不会产生独立公告。
+- **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 恢复 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 按会话隔离（话题与主会话并发操作不互相置过期）。
+- **不同步**：话题 session 不参与电脑端 → 飞书同步（watcher 只监听主会话 activeSessionFile）；同步游标 / 防回环 / inFlight 均不涉及话题 session（`markFeishuOriginEntries` 按主会话 activeSessionFile 匹配，话题轮次不标记、不累积；进程异常退出后 reconcile 清理话题 inFlight 仅清不标）。话题窗口内对话由飞书 → 电脑端方向直接写入共享 JSONL，电脑端 resume 可见。
 
 ### 2.2 Session 管理
 
@@ -109,7 +120,7 @@
   Session: <session 显示名称>
   ```
 - 触发时机：切换 / 新建 / 恢复 / 重命名 Session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）。
-- 首条公告创建后置顶（pin）；私聊不维护；无公告编辑权限时降级为日志告警。未选 Session 时（如改绑后）公告更新为占位内容（`Session: 未选择`），避免残留旧项目信息；**从未有过公告的群不创建占位公告**（避免未选 session 就置顶），首条公告仍由首次选 session 触发。
+- 首条公告创建后置顶（pin）；私聊不维护；无公告编辑权限时降级为日志告警。**话题窗口不维护公告**：话题内产生的操作（懒初始化建会话、切换模型、设置思考强度、重命名）均跳过公告刷新（见「话题窗口（thread）」）。未选 Session 时（如改绑后）公告更新为占位内容（`Session: 未选择`），避免残留旧项目信息；**从未有过公告的群不创建占位公告**（避免未选 session 就置顶），首条公告仍由首次选 session 触发。
 
 ### 2.5 命令执行
 
@@ -145,7 +156,7 @@
 
 ### 2.6 会话同步
 
-**方向**：电脑端 → 飞书由本服务推送；飞书 → 电脑端无推送（共享 session 文件，电脑端 resume 即可）。
+**方向**：电脑端 → 飞书由本服务推送；飞书 → 电脑端无推送（共享 session 文件，电脑端 resume 即可）。**话题独立 session 不参与本同步**（见「话题窗口（thread）」）。
 
 **自动同步**
 
@@ -197,7 +208,7 @@
 | `LARK_PI_RETRY_MAX_RETRIES` | 否 | `3` | 同步失败轮次可重试阈值 |
 | `LARK_MEDIA_CACHE_MAX_BYTES` | 否 | `524288000` | 引用附件缓存总容量（字节），LRU 按 mtime 清理 |
 
-**state.json**（原子写入：tmp + rename，串行防覆盖）：每群绑定 `cwd`、`chatType`、`activeSessionFile`、`feishuOriginEntryIds`（即时标记，见 2.6）、`sessionSync`（`autoBaselineEntryId` / `lastSyncedEntryId` / `lastLarkMessageId`）、`inFlightFeishuRun`、`updatedAt`。旧版 `sessionFile` 字段自动清除。Session 内容由 pi SDK 持久化（JSONL）。
+**state.json**（原子写入：tmp + rename，串行防覆盖）：每群绑定 `cwd`、`chatType`、`activeSessionFile`、`feishuOriginEntryIds`（即时标记，见 2.6）、`sessionSync`（`autoBaselineEntryId` / `lastSyncedEntryId` / `lastLarkMessageId`）、`inFlightFeishuRun`、`threadSessions`（`threadId → { sessionFile, updatedAt }`，话题独立会话，懒初始化）、`updatedAt`。旧版 `sessionFile` 字段自动清除。Session 内容由 pi SDK 持久化（JSONL）。
 
 **单实例锁**：`instance.lock` 写 PID；进程存活则拒绝启动；持有进程已退出（ESRCH）自动清理重试；获取锁时清理同目录中已确认失主的 `.tmp` 候选文件，避免异常退出长期积累。
 

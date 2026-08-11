@@ -6,6 +6,7 @@ import type { PiSessions } from '../pi.js';
 import type { ChatBinding } from '../types.js';
 import { createSessionFormCard, helpCard, sessionPickerCard } from '../cards.js';
 import { workspaceForChat } from '../sync/sync-service.js';
+import { rememberCardThread } from './topics.js';
 import { runPrompt } from '../agent/prompt.js';
 
 /** 消息入口：私聊自动绑定默认工作区；群聊需 @bot 或 /help */
@@ -13,7 +14,7 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
   if (!allowed(ctx, message)) return;
   const text = message.content.trim();
   if (message.chatType === 'p2p') await ensureDirectChat(ctx, message.chatId);
-  if (text === '/help') return showHelp(ctx, message.chatId, message.messageId);
+  if (text === '/help') return showHelp(ctx, message.chatId, message.messageId, message.threadId);
   if (message.chatType !== 'p2p' && !message.mentionedBot) return;
 
   // 富媒体分流（此时仅剩：私聊任意消息 / 群聊 @bot 消息）：
@@ -31,7 +32,7 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
   }
 
   const command = text.replace(/^<at>.*?<\/at>\s*/i, '').trim();
-  if (command === '/help') return showHelp(ctx, message.chatId, message.messageId);
+  if (command === '/help') return showHelp(ctx, message.chatId, message.messageId, message.threadId);
   if (!command) return; // 纯 @ 无文本 / 空消息不触发 agent
   if (command.startsWith('/')) {
     await ctx.lark.send(message.chatId, { markdown: '飞书仅支持 `/help` 文本命令，其他操作请在操作面板中完成。' }, { replyTo: message.messageId });
@@ -39,14 +40,17 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
   }
   const binding = ctx.state.get(message.chatId);
   const cwd = workspaceForChat(ctx, message.chatId);
-  const sessions = await ctx.pi.list(cwd);
   if (!binding) {
     await ctx.lark.send(message.chatId, { markdown: '该群尚未绑定项目，请使用 `/help` 中的「绑定项目」。' }, { replyTo: message.messageId });
     return;
   }
+  // 话题消息优先：使用话题独立 session（懒初始化在 runPrompt 内部完成），不依赖主会话 activeSessionFile
+  if (message.threadId) {
+    await runPrompt(ctx, message, text);
+    return;
+  }
+  const sessions = await ctx.pi.list(cwd);
   if (!binding.activeSessionFile) return showSessionSetup(ctx, message, sessions, { message, text: command });
-  const active = ctx.state.get(message.chatId)?.activeSessionFile;
-  if (!active) return;
   await runPrompt(ctx, message, text);
 }
 
@@ -78,9 +82,10 @@ async function bindDirectChat(ctx: AppContext, chatId: string): Promise<ChatBind
   return binding;
 }
 
-async function showHelp(ctx: AppContext, chatId: string, replyTo?: string): Promise<void> {
+async function showHelp(ctx: AppContext, chatId: string, replyTo?: string, threadId?: string): Promise<void> {
   const binding = ctx.state.get(chatId);
-  await ctx.lark.send(chatId, { card: helpCard(workspaceForChat(ctx, chatId), Boolean(binding), Boolean(binding?.activeSessionFile)) }, replyTo ? { replyTo } : undefined);
+  const sent = await ctx.lark.send(chatId, { card: helpCard(workspaceForChat(ctx, chatId), Boolean(binding), Boolean(binding?.activeSessionFile), threadId ? 'topic' : 'group') }, replyTo ? { replyTo } : undefined);
+  rememberCardThread(sent.messageId, threadId);
 }
 
 async function showSessionSetup(
@@ -94,5 +99,6 @@ async function showSessionSetup(
   const card = sessions.length === 0
     ? createSessionFormCard(nonce, '新建 Session')
     : sessionPickerCard(workspaceForChat(ctx, message.chatId), sessions, nonce);
-  await ctx.lark.send(message.chatId, { card }, { replyTo: message.messageId });
+  const sent = await ctx.lark.send(message.chatId, { card }, { replyTo: message.messageId });
+  rememberCardThread(sent.messageId, undefined); // 选择卡仅出现在普通消息路径（无话题），记录以命中后续卡片操作缓存
 }

@@ -5,6 +5,7 @@ import type { AppContext } from '../app-context.js';
 import { ATTACHMENT_MESSAGE_TYPES, MEDIA_IMAGE_INJECT_LIMIT, REPLY_CONTEXT_MAX_LENGTH } from '../config.js';
 import { resolveResource, type MediaResourceItem } from '../media/cache.js';
 import { workspaceForChat } from '../sync/sync-service.js';
+import { sessionFileForMessage } from '../lark/topics.js';
 import { updateAnnouncement } from '../announcement.js';
 import { escapeMarkdown } from '../utils/format.js';
 import type { PreparedPrompt, PromptImage } from '../types.js';
@@ -35,16 +36,18 @@ export type QuotedContextResult = QuotedContextSkeleton | { ok: false; error: st
  */
 export async function runPrompt(ctx: AppContext, message: NormalizedMessage, text: string): Promise<void> {
   const binding = ctx.state.get(message.chatId);
-  if (!binding?.activeSessionFile) return;
+  // 话题消息使用话题独立 session（懒初始化）；普通消息使用主会话 activeSessionFile
+  const sessionFile = await sessionFileForMessage(ctx, message);
+  if (!binding || !sessionFile) return;
   // 换机/路径失效防护：cwd 或 session 文件在当前环境不存在时（如从其他机器迁移 state 后旧路径失效），
   // 直接进入 Agent 会让 pi SDK 在旧路径下 mkdir 重建目录树并把新对话写入错误位置；改为提示用户重新绑定。
-  if (!(await workspacePathsExist(binding.cwd, binding.activeSessionFile))) {
+  if (!(await workspacePathsExist(binding.cwd, sessionFile))) {
     await ctx.lark.send(message.chatId, { markdown: '项目路径在当前环境下不存在，请重新绑定项目或创建项目群。' }, { replyTo: message.messageId });
     return;
   }
   // 快段：模型视觉能力查询与引用上下文组装并行（均不下载附件）
   const [canViewImages, quoted] = await Promise.all([
-    ctx.pi.supportsImages(binding.cwd, binding.activeSessionFile),
+    ctx.pi.supportsImages(binding.cwd, sessionFile),
     buildQuotedContext(ctx, message, text),
   ]);
   if (!quoted.ok) {
@@ -55,7 +58,7 @@ export async function runPrompt(ctx: AppContext, message: NormalizedMessage, tex
   const runId = randomUUID();
   await ctx.agentRuns.submit(message, {
     cwd: workspaceForChat(ctx, message.chatId),
-    sessionFile: binding.activeSessionFile,
+    sessionFile,
     prompt: quoted.promptSkeleton,
     id: runId,
     prepare: quoted.pendingResources.length > 0

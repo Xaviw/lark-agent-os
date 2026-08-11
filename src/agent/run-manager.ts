@@ -19,6 +19,7 @@ import { createCardUpdater } from '../utils/card-update.js';
 import { retryOnce } from '../utils/retry.js';
 import { agentFinalCard, agentQueuedCard, agentRunningCard } from '../cards.js';
 import { markFeishuOriginEntries } from '../sync/sync-service.js';
+import { rememberCardThread } from '../lark/topics.js';
 
 /**
  * 每群 Agent 串行队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡）。
@@ -49,6 +50,8 @@ export class AgentRunManager {
   async submit(message: NormalizedMessage, opts: SubmitRunOptions): Promise<void> {
     const id = opts.id ?? randomUUID();
     const sent = await this.ctx.lark.send(message.chatId, { card: agentQueuedCard(id, opts.prompt) }, { replyTo: message.messageId });
+    // 记录状态卡所在话题上下文：话题窗口内的 agent 卡后续「停止」操作直接命中缓存，免反查
+    rememberCardThread(sent.messageId, message.threadId);
     const run: AgentRun = {
       id, chatId: message.chatId, cwd: opts.cwd, sessionFile: opts.sessionFile, prompt: opts.prompt, messageId: sent.messageId, startedAt: Date.now(), state: 'queued',
       updater: createCardUpdater(this.ctx.lark, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '',

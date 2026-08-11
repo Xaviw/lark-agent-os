@@ -136,10 +136,20 @@ export function agentFinalCard(title: string, content: string, status?: string, 
   return { schema: '2.0', config: { summary: { content: titleWithElapsed } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**${titleWithElapsed}**\n\n${content}${status ? `\n\n${status}` : ''}`) }] } };
 }
 
-export function helpCard(cwd: string, bound: boolean, hasSession: boolean): object {
-  const bindingStatus = bound ? '' : '\n\n此群尚未绑定项目，请先绑定。';
-  const sessionStatus = hasSession ? '' : '\n\n尚未选择 Session，请使用「新建会话」或「切换会话」。';
+export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode: 'group' | 'topic' = 'group'): object {
+  // 话题模式：话题自动绑定独立 session（懒初始化），不提供会话管理/同步入口，工作路径固定不可修改；未绑定群仍需提示先绑定
+  const bindingStatus = mode === 'topic'
+    ? (bound ? '\n\n话题固定使用该工作路径，不支持修改。' : '\n\n此群尚未绑定项目，请先绑定。\n\n话题固定使用该工作路径，不支持修改。')
+    : bound ? '' : '\n\n此群尚未绑定项目，请先绑定。';
+  const sessionStatus = mode === 'topic' ? '' : (hasSession ? '' : '\n\n尚未选择 Session，请使用「新建会话」或「切换会话」。');
   const button = (label: string, cmd: string) => ({ tag: 'button', text: { tag: 'plain_text', content: label }, type: 'primary', behaviors: [{ type: 'callback', value: { cmd } }] });
+  // 话题模式去掉：新建会话 / 切换会话 / 绑定项目 / 同步消息（话题 = 独立 session，无手动会话管理；话题 session 不参与同步）
+  const sessionRowButtons = mode === 'topic'
+    ? [button('压缩会话', 'session.compact')]
+    : [button('新建会话', 'session.new.form'), button('压缩会话', 'session.compact'), button('切换会话', 'session.resume.form'), button('同步消息', 'session.sync.form')];
+  const projectRowButtons = mode === 'topic'
+    ? [button('执行命令', 'command.form'), button('创建项目群', 'project.create.form'), button('后台任务', 'bgTask.form')]
+    : [button('执行命令', 'command.form'), button('创建项目群', 'project.create.form'), button('绑定项目', 'project.bind.form'), button('后台任务', 'bgTask.form')];
   return {
     schema: '2.0', config: { summary: { content: 'lark-agent-os 操作面板' } }, body: { elements: [
       { tag: 'markdown', content: `**当前工作路径**\n\`${cwd}\`${bindingStatus}${sessionStatus}` }, { tag: 'hr' },
@@ -148,18 +158,8 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean): obje
         { tag: 'column', width: 'auto', elements: [button('切换思考强度', 'thinkingLevel.form')] },
         { tag: 'column', width: 'auto', elements: [button('重命名会话', 'session.rename.form')] },
       ] },
-      { tag: 'column_set', flex_mode: 'flow', columns: [
-        { tag: 'column', width: 'auto', elements: [button('新建会话', 'session.new.form')] },
-        { tag: 'column', width: 'auto', elements: [button('压缩会话', 'session.compact')] },
-        { tag: 'column', width: 'auto', elements: [button('切换会话', 'session.resume.form')] },
-        { tag: 'column', width: 'auto', elements: [button('同步消息', 'session.sync.form')] },
-      ] }, { tag: 'hr' },
-      { tag: 'column_set', flex_mode: 'flow', columns: [
-        { tag: 'column', width: 'auto', elements: [button('执行命令', 'command.form')] },
-        { tag: 'column', width: 'auto', elements: [button('创建项目群', 'project.create.form')] },
-        { tag: 'column', width: 'auto', elements: [button('绑定项目', 'project.bind.form')] },
-        { tag: 'column', width: 'auto', elements: [button('后台任务', 'bgTask.form')] },
-      ] },
+      { tag: 'column_set', flex_mode: 'flow', columns: sessionRowButtons.map((element) => ({ tag: 'column', width: 'auto', elements: [element] })) }, { tag: 'hr' },
+      { tag: 'column_set', flex_mode: 'flow', columns: projectRowButtons.map((element) => ({ tag: 'column', width: 'auto', elements: [element] })) },
     ] },
   };
 }

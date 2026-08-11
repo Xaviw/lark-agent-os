@@ -57,6 +57,14 @@ export function defaultProjectName(cwd: string): string {
   return `${basename(cwd) || 'project'}${stamp}`;
 }
 
+/** 话题自动会话命名（如「话题-05-20 14:30」）：电脑端 pi 列表可见，便于区分主会话。
+ * 时间用本地时区；同一分钟多个话题同名可接受（session 文件路径唯一）。
+ */
+export function topicSessionName(date = new Date()): string {
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `话题-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function resolveWorkspacePath(input: string, baseCwd: string): string {
   const value = input.trim();
   if (!value) throw new Error('请填写工作路径。');

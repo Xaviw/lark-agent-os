@@ -48,6 +48,7 @@
 | `src/sync/watcher.ts` | `SessionSyncWatcher`：fs.watch + 轮询 + 防抖 + 退避（电脑端 → 飞书单向同步） |
 | `src/utils/instance-lock.ts` | 原子发布 PID 实例锁、存活探测、陈旧锁清理与属主校验释放 |
 | `src/lark/messages.ts` | `handleMessage` + 私聊绑定 / 项目创建 / help / session 选择卡 |
+| `src/lark/topics.ts` | 话题（thread）支持层：懒初始化独立 session（`ensureThreadSession`）、消息会话解析（`sessionFileForMessage`）、卡片消息反查 threadId（`cardThreadId`，带缓存） |
 | `src/lark/card-actions.ts` | `handleCardAction`：全部 cmd 分支 + 表单解析（`cardFormValue` / `cardFormFlag` / toast / `parseCommandTimeout`） |
 | `src/announcement.ts` | 群公告 Docx 更新 + session 元数据读取 |
 | `src/utils/card-update.ts` | `createCardUpdater` / `updateCardWithRetry` / `createThrottledUpdate` |
@@ -65,8 +66,9 @@
   - 防回环（方案 B）：`selectSyncTurns` 把飞书轮次视为已消费并推进进度，`feishuOriginEntryIds` 消费即清理（O(1)，`slice(-1000)` 仅兜底）；
   - 超长：同步消息体按 **28KB（UTF-8 字节）** 截断 + 说明（飞书富文本上限 30KB，错误码 230025）。
   - 同步消息格式：post 行结构（每行独立 `text` 元素，**不经 md 解析**——md 会把 `\n\n` 折叠为单换行、内容特殊字符会被解析）；`[User]/[Agent]` 时间戳标题行带 `style: ['bold']` 加粗，每条消息后跟一个空 `text` 行渲染为可见空白行（实测确认）。
-- **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护。
-- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / updatedAt`。
+- **话题窗口（thread）**：话题消息事件与原会话共享 `chat_id`、带 `threadId`。话题内首次 @bot（群）/任意消息（私聊）懒初始化**独立 session**（`src/lark/topics.ts` 的 `ensureThreadSession`，命名 `话题-MM-DD HH:mm`，in-flight 守卫 + 双检防并发重复创建）并绑定 `binding.threadSessions[threadId]`；话题对话不写入主会话、不依赖主会话 activeSessionFile。**cardAction 事件无 threadId**——优先命中**发送侧记录**（`rememberCardThread`：本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage` 反查（`cardThreadId`，in-flight 守卫、失败不缓存按非话题处理）；`handleCardAction` 内**惰性反查**（`resolveThread`，`agent.stop` / `command.stop` 零反查）。话题语义：会话 = 话题 session（切换模型 / 思考强度 / 重命名 / 压缩作用于话题 session）、**不触发公告**（懒初始化与各 updateAnnouncement 调用点均跳过）、**不参与电脑端同步**（watcher 只监听 activeSessionFile，reconcile 仅清理话题 inFlight 不标记）、help 话题模式去「新建会话 / 切换会话 / 绑定项目 / 同步消息」且工作路径固定不可改、群级 cmd 直接拒绝（`TOPIC_BLOCKED_CMDS` 含 session.sync.*，防旧卡 / 直连）。话题内卡片响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡——`startShellCommand` 带 replyTo）；`pending` 按会话隔离（key = `chatId:threadId`）。
+- **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护；**话题内操作不触发**。
+- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / threadSessions（话题 threadId → { sessionFile, updatedAt }）/ updatedAt`。
 - **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试；启动获取锁时会清理同目录中已确认所属进程退出的候选 `.tmp` 文件。
 
 ## 命名与代码约定

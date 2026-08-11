@@ -8,10 +8,18 @@ export interface SessionSyncState {
   lastLarkMessageId?: string;
 }
 
+/** 话题（threadId）绑定的独立会话：话题窗口内的对话归属该 session，与主会话隔离 */
+export interface ThreadSessionBinding {
+  sessionFile: string;
+  updatedAt: string;
+}
+
 export interface ChatBinding {
   cwd: string;
   chatType?: 'group' | 'p2p';
   activeSessionFile?: string;
+  /** 话题 → 独立会话（懒初始化：话题内首次 @bot 时新建并绑定；不参与电脑端同步、不触发公告） */
+  threadSessions?: Record<string, ThreadSessionBinding>;
   /** 飞书来源 entry id（防回环）。即时标记：飞书 run 结束时记录本轮 ids，同步消费（进度推进）后立即清理，仅极端情况保留最近 1000 条 */
   feishuOriginEntryIds?: string[];
   sessionSync?: SessionSyncState;

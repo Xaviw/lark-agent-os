@@ -27,8 +27,9 @@ export async function startShellCommand(
   taskId: string,
   timeoutSeconds?: number,
   background = false,
+  replyTo?: string,
 ): Promise<void> {
-  const sent = await ctx.lark.send(chatId, { card: commandStartingCard(command, cwd, timeoutSeconds) });
+  const sent = await ctx.lark.send(chatId, { card: commandStartingCard(command, cwd, timeoutSeconds) }, replyTo ? { replyTo } : undefined);
   await runShellCommand(ctx, chatId, cwd, command, taskId, sent.messageId, timeoutSeconds, background);
 }
 

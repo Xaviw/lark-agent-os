@@ -57,10 +57,17 @@ export class SessionSyncWatcher {
         continue;
       }
       const inFlight = binding.inFlightFeishuRun;
-      if (inFlight?.sessionFile === binding.activeSessionFile) {
-        await markFeishuOrigin(this.ctx, chatId, inFlight.sessionFile, new Set(inFlight.beforeEntryIds), inFlight.prompt);
-        this.ctx.state.update(chatId, { inFlightFeishuRun: undefined });
-        await this.ctx.state.flush();
+      if (inFlight) {
+        const isMainSession = inFlight.sessionFile === binding.activeSessionFile;
+        // 话题 run 的 inFlight 仅清理不标记（话题 session 不参与同步，标记只会累积无用条目）
+        const isThreadSession = Object.values(binding.threadSessions ?? {}).some((t) => t.sessionFile === inFlight!.sessionFile);
+        if (isMainSession) {
+          await markFeishuOrigin(this.ctx, chatId, inFlight.sessionFile, new Set(inFlight.beforeEntryIds), inFlight.prompt);
+        }
+        if (isMainSession || isThreadSession) {
+          this.ctx.state.update(chatId, { inFlightFeishuRun: undefined });
+          await this.ctx.state.flush();
+        }
       }
       await ensureAutoBaseline(this.ctx, chatId);
     }
