@@ -7,6 +7,11 @@ export function escapeCommand(command: string): string {
   return command.replace(/`/g, '\\`').replace(/[\r\n]+/g, ' ').trim();
 }
 
+/** 用户可控文本的 markdown 转义（用于卡片渲染的展示文案，如文件名、错误摘要）；只转义任意位置生效的元字符 */
+export function escapeMarkdown(text: string): string {
+  return text.replace(/([\\`*_[\]{}()#|>])/g, '\\$1').replace(/[\r\n]+/g, ' ').trim();
+}
+
 /** 时间格式化：兼容 number / string / 非法值（非法时显示占位） */
 export function formatTimestamp(timestamp: unknown): string {
   const date = new Date(typeof timestamp === 'string' || typeof timestamp === 'number' ? timestamp : NaN);

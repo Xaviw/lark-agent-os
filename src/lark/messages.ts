@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NormalizedMessage } from '@larksuite/channel';
 import type { AppContext } from '../app-context.js';
+import { ATTACHMENT_MESSAGE_TYPES } from '../config.js';
 import type { PiSessions } from '../pi.js';
 import type { ChatBinding } from '../types.js';
 import { createSessionFormCard, helpCard, sessionPickerCard } from '../cards.js';
@@ -14,6 +15,20 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
   if (message.chatType === 'p2p') await ensureDirectChat(ctx, message.chatId);
   if (text === '/help') return showHelp(ctx, message.chatId, message.messageId);
   if (message.chatType !== 'p2p' && !message.mentionedBot) return;
+
+  // 富媒体分流（此时仅剩：私聊任意消息 / 群聊 @bot 消息）：
+  // - 贴纸：静默忽略（表达情绪，不下载不提示）；
+  // - 图片 / 文件 / 音视频：不进 agent，回轻提示，用户「引用（回复）」该消息并附文字后处理（见 promptWithReplyContext）。
+  const kind = message.rawContentType;
+  if (kind === 'sticker') return;
+  if (kind && ATTACHMENT_MESSAGE_TYPES.has(kind)) {
+    await ctx.lark.send(
+      message.chatId,
+      { markdown: '已收到 ✅ 引用（回复）该文件并附上需求，即可让我处理' },
+      { replyTo: message.messageId },
+    );
+    return;
+  }
 
   const command = text.replace(/^<at>.*?<\/at>\s*/i, '').trim();
   if (command === '/help') return showHelp(ctx, message.chatId, message.messageId);

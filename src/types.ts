@@ -52,12 +52,29 @@ export type CardUpdater = {
   finish: (card: object) => Promise<void>;
 };
 
+/** 注入 agent 的图片附件（base64），pi.prompt 内部转 pi-ai ImageContent */
+export type PromptImage = {
+  data: string;
+  mimeType: string;
+};
+
+/** 附件准备（后台下载）完成后的最终 prompt；error 时本轮不进 agent */
+export type PreparedPrompt = {
+  prompt: string;
+  images?: PromptImage[];
+  error?: string;
+};
+
 export type AgentRun = {
   id: string;
   chatId: string;
   cwd: string;
   sessionFile: string;
   prompt: string;
+  /** 本次 prompt 附带的图片（base64），无则 undefined */
+  images?: PromptImage[];
+  /** 后台附件准备任务（下载被引用资源 → 最终 prompt）；提交时立即启动，execute 前 await */
+  prepare?: Promise<PreparedPrompt>;
   messageId: string;
   startedAt: number;
   state: 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'cancelled';

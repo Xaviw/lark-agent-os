@@ -2,7 +2,18 @@ import { randomUUID } from 'node:crypto';
 import type { NormalizedMessage } from '@larksuite/channel';
 import type { AppContext } from '../app-context.js';
 import { AGENT_CARD_UPDATE_INTERVAL_MS } from '../config.js';
-import type { AgentRun } from '../types.js';
+import type { AgentRun, PreparedPrompt, PromptImage } from '../types.js';
+
+/** submit 的入参（避免可选参数膨胀） */
+export interface SubmitRunOptions {
+  cwd: string;
+  sessionFile: string;
+  /** 提交时的 prompt 骨架（引用附件段可能由 prepare 补齐） */
+  prompt: string;
+  id?: string;
+  /** 后台附件准备（下载被引用资源 → 最终 prompt）；提交时立即启动，execute 前 await */
+  prepare?: () => Promise<PreparedPrompt>;
+}
 import { agentFailureContent, elapsedSince } from '../utils/format.js';
 import { createCardUpdater } from '../utils/card-update.js';
 import { retryOnce } from '../utils/retry.js';
@@ -35,11 +46,16 @@ export class AgentRunManager {
       && !['succeeded', 'failed', 'cancelled'].includes(run.state));
   }
 
-  async submit(message: NormalizedMessage, cwd: string, sessionFile: string, prompt: string, id = randomUUID()): Promise<void> {
-    const sent = await this.ctx.lark.send(message.chatId, { card: agentQueuedCard(id, prompt) }, { replyTo: message.messageId });
+  async submit(message: NormalizedMessage, opts: SubmitRunOptions): Promise<void> {
+    const id = opts.id ?? randomUUID();
+    const sent = await this.ctx.lark.send(message.chatId, { card: agentQueuedCard(id, opts.prompt) }, { replyTo: message.messageId });
     const run: AgentRun = {
-      id, chatId: message.chatId, cwd, sessionFile, prompt, messageId: sent.messageId, startedAt: Date.now(), state: 'queued',
+      id, chatId: message.chatId, cwd: opts.cwd, sessionFile: opts.sessionFile, prompt: opts.prompt, messageId: sent.messageId, startedAt: Date.now(), state: 'queued',
       updater: createCardUpdater(this.ctx.lark, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '',
+      // 后台附件准备：提交时立即启动（与排队并行），execute 前 await；内部异常兑底为失败结果
+      prepare: opts.prepare
+        ? opts.prepare().catch((error) => ({ prompt: opts.prompt, error: `附件准备失败：${error instanceof Error ? error.message : String(error)}` }))
+        : undefined,
     };
     this.runs.set(id, run);
     const queue = this.queues.get(run.chatId) ?? [];
@@ -121,6 +137,20 @@ export class AgentRunManager {
   private async execute(run: AgentRun): Promise<void> {
     run.state = 'running';
     run.startedAt = Date.now();
+    // 附件就绪（提交时已后台并行下载；失败 → 失败卡结束，本轮不进 agent）
+    if (run.prepare) {
+      const prepared = await run.prepare;
+      if (prepared.error) {
+        // stop 竞态对齐：prepare 失败与用户停止同时发生时按停止处理
+        run.state = run.stopRequested ? 'cancelled' : 'failed';
+        console.warn('[agent prepare]', prepared.error);
+        await run.updater.finish(agentFinalCard(run.state === 'cancelled' ? 'Agent 已停止' : 'Agent 处理失败', prepared.error, undefined, elapsedSince(run.startedAt))).catch((error) => console.warn('[agent final status]', error));
+        return;
+      }
+      run.prompt = prepared.prompt;
+      run.images = prepared.images;
+      run.prepare = undefined;
+    }
     void run.updater.update(agentRunningCard(run.id, run.prompt)).catch((error) => console.warn('[agent start status]', error));
     let previewTimer: NodeJS.Timeout | undefined;
     let lastPreviewAt = 0;
@@ -140,6 +170,7 @@ export class AgentRunManager {
       }, {
         runId: run.id,
         isCancelled: () => run.stopRequested,
+        images: run.images,
         onBeforeEntryIds: async (entryIds) => {
           run.originBefore = new Set(entryIds);
           this.ctx.state.update(run.chatId, {

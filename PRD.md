@@ -31,7 +31,8 @@
 
 - 群聊普通消息须 `@bot`；私聊（p2p）免 `@`，固定使用 `LARK_DEFAULT_WORKSPACE` 且不可切换。
 - 文本以 `/` 开头时仅接受 `/help`，其余回复"请在操作面板中完成"。
-- 机器人自身消息不处理（防自触发）；仅处理普通文本，不支持富媒体。
+- 机器人自身消息不处理（防自触发）。
+- 消息类型分流（依据 `rawContentType`）：`text` / `post` / `interactive` 按文本处理；`sticker` 静默忽略；`image` / `file` / `audio` / `video` 不直接进入 agent，回复轻提示「已收到 ✅ 引用（回复）该文件并附上需求，即可让我处理」，用户「引用（回复）」该消息并附文字后处理（见「引用附件」）。
 - 群未绑定项目 → 回复"该群尚未绑定项目，请使用 `/help` 中的「绑定项目」"。
 
 **`/help` 操作面板**
@@ -55,9 +56,11 @@
 - 完成 / 失败：最终卡无按钮，标题含耗时（如"Agent 处理完成 - 耗时：23 秒"）；失败 = 已有输出 + 错误信息 + 状态栏。
 - 边界：停止后预览节流停止（`state !== running`）；多群并行、每群串行（同一 session 文件被多群共享时，prompt/compact/rename 等写操作跨群同样串行，按 sessionFile 锁）；服务关闭时统一停止并通知（见 2.8）。
 
-**回复引用上下文**
+**回复引用上下文（含引用附件）**
 
-- 消息带 `replyToMessageId` 时抓取被引用消息（截断 12,000 字符）与发送者，以 `<reply_context>` 注入 prompt。
+- 消息带 `replyToMessageId` 时抓取被引用消息：文本 / post 消息截断 12,000 字符后与发送者以 `<quoted_context>` 注入 prompt（纯附件类消息的 normalize 占位不注入）；抓取失败 → 回复原因，本轮不进 agent。
+- 被引用消息带资源（图片 / 文件 / 音视频 / 贴纸）时下载到 `<LARK_STATE_DIR>/media`（sha256 命名、同内容复用、mtime LRU 清理，容量上限 `LARK_MEDIA_CACHE_MAX_BYTES` 默认 512MB，下载超时 30s）。**下载在后台异步进行**：消息到达**立即**发「Agent 等待处理」卡（不等文件下载完成），附件就绪后才进入 agent 执行并流式更新；任一附件下载失败 / 超限 → 任务卡以「Agent 处理失败」结束，本轮不进 agent。
+- 注入分级：`image/*` 且 ≤10MB 且当前模型支持视觉输入（Model.input 含 image）→ 以 base64 图片附件随 prompt 注入（模型可直接查看）；其余（含超限 / 不支持视觉的图片）→ 注入文件名、大小、mime、本地路径，由 agent 自行读取（会话默认启用 read / bash 等工具）。
 - 获取失败（`fetchMessage` 抛错）或内容为空 → **不进入 agent 流程**（不建 run、不设 `inFlightFeishuRun`），以 markdown 回复「无法处理引用消息：<原因>」。
 - 边界：引用消息过长时注入截断版本并标注。
 
@@ -192,6 +195,7 @@
 | `LARK_STATE_DIR` | 否 | `.state` | 状态目录 |
 | `LARK_PI_STATUS_ENABLED` | 否 | `true` | Agent 回复状态栏开关 |
 | `LARK_PI_RETRY_MAX_RETRIES` | 否 | `3` | 同步失败轮次可重试阈值 |
+| `LARK_MEDIA_CACHE_MAX_BYTES` | 否 | `524288000` | 引用附件缓存总容量（字节），LRU 按 mtime 清理 |
 
 **state.json**（原子写入：tmp + rename，串行防覆盖）：每群绑定 `cwd`、`chatType`、`activeSessionFile`、`feishuOriginEntryIds`（即时标记，见 2.6）、`sessionSync`（`autoBaselineEntryId` / `lastSyncedEntryId` / `lastLarkMessageId`）、`inFlightFeishuRun`、`updatedAt`。旧版 `sessionFile` 字段自动清除。Session 内容由 pi SDK 持久化（JSONL）。
 

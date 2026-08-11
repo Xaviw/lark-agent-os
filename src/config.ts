@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -28,3 +28,14 @@ export const PI_SESSION_CACHE_LIMIT = 32;
 export const INSTANCE_LOCK_INVALID_GRACE_MS = 5_000;
 export const SYNC_BODY_BYTE_LIMIT = 28 * 1024; // 飞书富文本 30KB 上限，为 JSON 转义 / md 标签膨胀预留余量
 export const SYNC_TRUNCATION_MARKER = '（同步内容过长，内容已截断）';
+
+// ── 引用附件（飞书资源下载缓存）──
+export const mediaRoot = join(stateRoot, 'media');
+/** 附件缓存总容量上限（LRU 按 mtime 清理） */
+export const MEDIA_CACHE_MAX_BYTES = nonNegativeIntegerEnv('LARK_MEDIA_CACHE_MAX_BYTES', 512 * 1024 * 1024);
+/** 单个附件下载超时 */
+export const MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
+/** 图片走模型视觉通道（images 参数）的单张大小上限；超限降级为路径注入 */
+export const MEDIA_IMAGE_INJECT_LIMIT = 10 * 1024 * 1024;
+/** 纯附件类消息类型：到达时不进 agent（贴纸静默；其余回轻提示），且其 content 为 normalize 占位 */
+export const ATTACHMENT_MESSAGE_TYPES = new Set(['image', 'file', 'audio', 'video', 'sticker']);

@@ -9,6 +9,7 @@ import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PI_SESSION_CACHE_LIMIT } from './config.js';
+import type { PromptImage } from './types.js';
 
 export type PiPromptResult = {
   answer: string;
@@ -26,6 +27,8 @@ export type PiThinkingLevel = Parameters<AgentSession['setThinkingLevel']>[0];
 type PiPromptOptions = {
   runId?: string;
   isCancelled?: () => boolean;
+  /** 随 prompt 注入的图片（base64），转 pi-ai ImageContent 传给模型 */
+  images?: PromptImage[];
   onBeforeEntryIds?: (entryIds: string[]) => Promise<void>;
   onEntryIds?: (entryIds: string[]) => void;
 };
@@ -141,7 +144,8 @@ export class PiSessions {
         await opts?.onBeforeEntryIds?.([...beforeMessageIds]);
         // flush 期间可能收到 stop；第二次检查与下方 prompt 调用处于同一同步段。
         if (opts?.isCancelled?.()) return { answer: '', status: undefined };
-        await session.prompt(text);
+        const images = opts?.images?.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));
+        await session.prompt(text, images && images.length > 0 ? { images } : undefined);
         const error = latestAssistantError(session, beforeMessageIds);
         if (error) throw new Error(error);
         return {
@@ -171,6 +175,15 @@ export class PiSessions {
     const ownerRunId = this.runningPrompt.get(sessionFile);
     if (runId !== undefined && ownerRunId !== runId) return;
     await this.sessions.get(sessionFile)?.abort();
+  }
+
+  /** 当前会话模型是否支持图片输入（视觉）。查询失败按不支持处理（调用方降级为路径注入）。 */
+  async supportsImages(cwd: string, sessionFile: string): Promise<boolean> {
+    try {
+      return await this.usingSession(cwd, sessionFile, (session) => session.model?.input.includes('image') ?? false);
+    } catch {
+      return false;
+    }
   }
 
   async models(): Promise<PiModelOption[]> {

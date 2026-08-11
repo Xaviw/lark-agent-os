@@ -74,7 +74,7 @@
 - **交流、文档、注释一律简体中文**；标识符 / 错误消息用中文也可，但 `cmd` 值、env 名、字段名保持英文。
 - 思考强度用 `thinkingLevel`（**绝不用 `effort`**）。
 - `cmd` 命名：`<域>.<动作>`（如 `project.bind.submit`、`session.compact`）；按钮显示文本中文、`cmd` 不变。
-- 环境变量：`LARK_APP_ID` / `LARK_APP_SECRET`（必填）、`LARK_DEFAULT_WORKSPACE`（默认进程 cwd）、`LARK_STATE_DIR`（默认 `.state`）、`LARK_PI_STATUS_ENABLED`（默认 true）、`LARK_PI_RETRY_MAX_RETRIES`（默认 3）。已删除 `LARK_PI_STATUS_AUTO_COMPACTION`，勿再引入。
+- 环境变量：`LARK_APP_ID` / `LARK_APP_SECRET`（必填）、`LARK_DEFAULT_WORKSPACE`（默认进程 cwd）、`LARK_STATE_DIR`（默认 `.state`）、`LARK_PI_STATUS_ENABLED`（默认 true）、`LARK_PI_RETRY_MAX_RETRIES`（默认 3）、`LARK_MEDIA_CACHE_MAX_BYTES`（引用附件缓存上限，默认 512MB）。已删除 `LARK_PI_STATUS_AUTO_COMPACTION`，勿再引入。
 - 常量集中在 `src/config.ts`（`*_LIMIT`、`*_INTERVAL_MS`、`SYNC_*` 等）；env 解析也在此（顶层求值，import 即校验必填项）。
 
 ## 文档工作流（重要）
