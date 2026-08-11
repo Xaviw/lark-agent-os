@@ -20,7 +20,7 @@
 
 - **无测试框架 / 无 lint 脚本**。验证手段：
   1. `pnpm typecheck` + `pnpm build`；
-  2. 纯逻辑（如 `selectSyncTurns`、`truncateSyncBody`、节流、卡片构建）用**临时 tsx 脚本**直接 import 项目模块验证边界，通过后删除，不留项目内；注意 `config.ts` 顶层会解析 env（缺 `LARK_APP_ID` 抛错），脚本需先设 `LARK_APP_ID` / `LARK_APP_SECRET` 再动态 import（ESM 静态 import 先于赋值执行）；
+  2. 纯逻辑（如 `selectSyncTurns`、`truncateSyncRows`、节流、卡片构建）用**临时 tsx 脚本**直接 import 项目模块验证边界，通过后删除，不留项目内；注意 `config.ts` 顶层会解析 env（缺 `LARK_APP_ID` 抛错），脚本需先设 `LARK_APP_ID` / `LARK_APP_SECRET` 再动态 import（ESM 静态 import 先于赋值执行）；
   3. 端到端需真实飞书凭据，无法在本地自动验证——依赖上一步的逻辑测试 + 仔细的代码审查。
 - 抽纯函数便于验证：把副作用（state/lark 调用）与决策逻辑分离（参考 `selectSyncTurns` 模式）。纯函数模块（`sync/select-turns.ts` / `sync/truncate.ts` / `utils/format.ts`）不依赖 state / lark，可独立 import 验证。
 
@@ -40,10 +40,10 @@
 | `src/lark-api.ts` | tenant token 缓存 + 群公告 Docx API |
 | `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡） |
 | `src/agent/prompt.ts` | `runPrompt` / `promptWithReplyContext` / `useNewSession`（引用消息上下文、飞书来源标记） |
-| `src/commands/shell.ts` | 命令执行（`$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`） |
+| `src/commands/shell.ts` | 命令执行（平台感知 shell：Windows `cmd.exe /d /s /c`、POSIX `$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`） |
 | `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `extractText`（纯函数） |
 | `src/sync/select-turns.ts` | `selectSyncTurns`：方案 B 轮次选择（纯函数） |
-| `src/sync/truncate.ts` | `truncateSyncBody`：28KB 字节截断（纯函数） |
+| `src/sync/truncate.ts` | `truncateSyncRows`：28KB 按行截断（纯函数，头 1/3 行 + 尾 2/3 行，超长单行退化为字符截断） |
 | `src/sync/sync-service.ts` | `syncComputerSessions` / `ensureAutoBaseline` / `markFeishuOrigin` / `workspaceForChat` |
 | `src/sync/watcher.ts` | `SessionSyncWatcher`：fs.watch + 轮询 + 防抖 + 退避（电脑端 → 飞书单向同步） |
 | `src/utils/instance-lock.ts` | 原子发布 PID 实例锁、存活探测、陈旧锁清理与属主校验释放 |
@@ -58,12 +58,13 @@
 - **卡片交互**：全部为 JSON 2.0（`schema: '2.0'`）。按钮 `behaviors: [{ type: 'callback', value: { cmd, ... } }]`；表单用 `form` 容器 + `input` / `checker`（V7.9+）。`cardFormValue` 只取 string 值并 trim；布尔字段（checker）用 `cardFormFlag` 单独读取。卡片操作带 `nonce` 防过期。
 - **卡片更新**：`createCardUpdater`（pending + 单飞队列串行化 + 失败重试一次）；**事件驱动节流**（750ms，非轮询）——agent 预览与命令输出共用该模式（`createThrottledUpdate`）。内容限制：卡片 6000 字符（`limitedMarkdown` 头 1/3 + 尾），命令输出内存 30KB。
 - **Agent 队列状态机**：每群串行 `queued → running → succeeded / failed / cancelled`（含 `stopping`）；停止过渡卡带 `run.latestOutput`；`inFlightFeishuRun.beforeEntryIds` 在 sessionFile 锁内、SDK prompt 前采集并持久化，结束后按精确新增 ids 即时标记飞书来源。
-- **命令执行**：`$SHELL -lc` 于群绑定 cwd；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新，输出中的反引号由动态长度 code fence 包裹；Agent 最终回答保留 Markdown 原文；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
+- **命令执行**：shell 平台感知（`resolveShell` 纯函数）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；输出编码以 cmd 默认代码页为准），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；于群绑定 cwd 执行；spawn 带 `windowsHide: true`；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新，输出中的反引号由动态长度 code fence 包裹；Agent 最终回答保留 Markdown 原文；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
 - **会话同步（方向不对称）**：
   - 电脑端 → 飞书：`SessionSyncWatcher`（fs.watch + 60s 轮询 + 750ms 防抖 + 双 stat 校验 + 指数退避 ≤3 次）单向推送；同一 `activeSessionFile` 被多个群绑定时，任一群的 Agent / 飞书轮次都会让所有绑定群暂缓同步，完成后统一重新调度；
   - 飞书 → 电脑端：**无推送**，pi SDK 直接写共享 session JSONL，电脑端 resume 可见；
   - 防回环（方案 B）：`selectSyncTurns` 把飞书轮次视为已消费并推进进度，`feishuOriginEntryIds` 消费即清理（O(1)，`slice(-1000)` 仅兜底）；
   - 超长：同步消息体按 **28KB（UTF-8 字节）** 截断 + 说明（飞书富文本上限 30KB，错误码 230025）。
+  - 同步消息格式：post 行结构（每行独立 `text` 元素，**不经 md 解析**——md 会把 `\n\n` 折叠为单换行、内容特殊字符会被解析）；`[User]/[Agent]` 时间戳标题行带 `style: ['bold']` 加粗，每条消息后跟一个空 `text` 行渲染为可见空白行（实测确认）。
 - **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护。
 - **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / updatedAt`。
 - **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试；启动获取锁时会清理同目录中已确认所属进程退出的候选 `.tmp` 文件。
@@ -88,7 +89,7 @@
 2. **edit 多块是原子应用**：一次调用中任一 `oldText` 不匹配则**整体失败**，失败后易漏改其他块（本次曾因此残留 `command.output` 分支直到 grep 才发现）。改完必须 grep 验证关键标记（被删除的分支名、新增关键词/常量）确认真正生效。
 3. **oldText 唯一性**：同一文本出现多处时（如 `const binding = state.get(event.chatId);` 在 main.ts 出现两次）加长上下文；同一调用内两个 edit 的 `oldText` 不得重叠/嵌套。
 4. **核心逻辑 review 边界分支**：涉及进度推进 / 消费 / 截断 / 分组取舍的逻辑，改完检查空集、全排除、单元素等路径（本次方案 B 曾把进度推进写进“有发送”分支，导致纯飞书轮次被排除时进度不推进——review 时发现并移出发送分支）。
-5. **复杂算法先写临时边界测试**：用临时 tsx 脚本验证边界（多字节字符切分、临界字节、突发节流、空态、交错轮次），通过后删除脚本；断言要基于**需求语义**（如 auto = 最新电脑端轮次，而非“最新轮”）。副作用与决策分离成纯函数（如 `selectSyncTurns`、`truncateSyncBody`）以便独立测试。
+5. **复杂算法先写临时边界测试**：用临时 tsx 脚本验证边界（多字节字符切分、临界字节、突发节流、空态、交错轮次），通过后删除脚本；断言要基于**需求语义**（如 auto = 最新电脑端轮次，而非“最新轮”）。副作用与决策分离成纯函数（如 `selectSyncTurns`、`truncateSyncRows`）以便独立测试。
 6. **清理要成对**：移除清单类文档的条目时同步插入归档记录；收尾时 `grep -n "^## "` 核对标题完整性（曾漏删正文条目，收尾才统一清理）。
 7. **含反引号的归档片段**：用临时文件 + node 拼接写入，避免 shell 模板字符串转义问题。
 
@@ -118,4 +119,4 @@
 - **重启警告（重要）**：不要在由同一个 `lark-agent-os` 进程处理的飞书 Agent 请求中执行 `kill -TERM <lark-agent-os-pid>`——服务进入关闭流程后会中止所有正在执行的 Agent run（含当前请求），导致 `Error: This operation was aborted`。应在当前 Agent 请求完成后，从**外部终端**重启服务；如必须以编程方式触发重启，应先启动一个脱离旧服务进程组的 supervisor，再停止服务；supervisor 等待旧 PID 退出后再启动新实例。
 - 排查：关键路径日志前缀 `[agent run]` / `[command]` / `[session sync]` / `[announcement]` / `[session watch]` / `[compact]` / `[cardAction]`；状态看 `.state/state.json`；锁文件残留（进程已死）会自动清理。
 - shutdown 流程：终止 commandTasks + backgroundTasks → 关 watcher → 停止 agent（1.5s 内发「服务正在关闭」卡）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
-- 已知边界：Windows 下进程组终止退化为单进程 kill；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志。
+- 已知边界：Windows 下进程组终止退化为单进程 kill；Windows 固定 `cmd.exe` 执行（POSIX 命令如 `ls` 不可用，需 cmd 语法；输出编码以 cmd 默认代码页为准；命令内嵌引号经 node spawn Windows 转义后可能原样输出含 `\` 的引号）；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志。

@@ -82,6 +82,12 @@ export type SessionMessageEntry = {
   message?: { role?: string; content?: unknown; stopReason?: string; errorMessage?: string };
 };
 
+/** 同步消息的一行：text 为行内容（可含 \n 软换行），bold 为加粗标题行（[User]/[Agent] 时间戳） */
+export type SyncRow = {
+  text: string;
+  bold?: boolean;
+};
+
 export type ComputerTurn = {
   user: SessionMessageEntry & { message: NonNullable<SessionMessageEntry['message']> };
   final: SessionMessageEntry & { message: NonNullable<SessionMessageEntry['message']> };

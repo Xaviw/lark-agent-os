@@ -5,7 +5,8 @@ import { formatTimestamp } from '../utils/format.js';
 import type { ComputerTurn, SessionMessageEntry } from '../types.js';
 import { extractText, finalFailureMessage, isSessionMessageEntry, sessionBranchEntries } from './session-entries.js';
 import { selectSyncTurns } from './select-turns.js';
-import { truncateSyncBody } from './truncate.js';
+import { truncateSyncRows } from './truncate.js';
+import type { SyncRow } from '../types.js';
 
 /** 群工作路径：私聊固定默认工作区；群聊取绑定 cwd，未绑定回退默认工作区 */
 export function workspaceForChat(ctx: AppContext, chatId: string): string {
@@ -85,20 +86,22 @@ export async function syncComputerSessions(
   let truncated = false;
   let sentMessageId: string | undefined;
   if (selected.length > 0) {
-    const text = selected.map(formatComputerTurn).filter(Boolean).join('\n\n');
-    if (text) {
+    // 行结构：每轮标题（加粗）+ 内容 + 空行，轮间自然分隔；全部使用 text 元素（不经 md 解析，避免 `\n\n` 折叠与内容特殊字符被解析）
+    let rows = selected.flatMap(formatComputerTurn);
+    if (rows.length > 0) {
       const last = selected.at(-1)!;
       const status = await ctx.pi.statusAt(workspaceForChat(ctx, chatId), binding.activeSessionFile, last.final.id).catch(() => undefined);
-      let body = `${text}${status ? `\n\n${status}` : ''}`;
-      if (Buffer.byteLength(body, 'utf8') > SYNC_BODY_BYTE_LIMIT) {
-        body = truncateSyncBody(body, SYNC_BODY_BYTE_LIMIT);
+      if (status) rows = [...rows, { text: status }];
+      if (rowsByteLength(rows) > SYNC_BODY_BYTE_LIMIT) {
+        rows = truncateSyncRows(rows, SYNC_BODY_BYTE_LIMIT);
         truncated = true;
       }
-      const sent = await ctx.lark.send(chatId, { post: { zh_cn: { title: '', content: [[{ tag: 'md', text: body }]] } } });
+      const content = rows.map((row) => [{ tag: 'text', text: row.text, ...(row.bold ? { style: ['bold'] } : {}) }]);
+      const sent = await ctx.lark.send(chatId, { post: { zh_cn: { title: '', content } } });
       sentMessageId = sent.messageId;
       sentCount = selected.length;
     }
-    // 说明：selected 有轮次但 text 为空（无法格式化的空轮次，如无文本消息）时，不发送但仍推进进度（视为已消费），
+    // 说明：selected 有轮次但 rows 为空（无法格式化的空轮次，如无文本消息）时，不发送但仍推进进度（视为已消费），
     // 避免该轮次被无限重扫；此时 toast 显示「无待同步消息」但 lastSyncedEntryId 已推进。
   }
   // 方案 B：进度推进到最后一个已消费轮次（含被排除的飞书轮次）；消费后立即清理进度之前的飞书来源标记（O(1) 即时释放，不再长期保留）
@@ -122,12 +125,28 @@ function isSessionBusy(ctx: AppContext, sessionFile: string): boolean {
     && binding.inFlightFeishuRun?.sessionFile === sessionFile);
 }
 
-function formatComputerTurn(turn: ComputerTurn): string {
+/**
+ * 将一轮对话格式化为同步消息行：加粗标题行 + 内容行，每条消息后跟一个空行（text 元素空行在飞书客户端渲染为可见空白行）。
+ * 无法格式化的空轮次返回空数组（调用方 flatMap 自然忽略）。
+ */
+function formatComputerTurn(turn: ComputerTurn): SyncRow[] {
   const user = extractText(turn.user.message.content);
   const answer = turn.assistantMessages.map((entry) => extractText(entry.message.content)).filter(Boolean).join('\n\n');
   const failure = answer ? undefined : finalFailureMessage(turn);
-  if (!user || (!answer && !failure)) return '';
-  return `[User] ${formatTimestamp(turn.user.timestamp)}\n${user}\n\n[Agent] ${formatTimestamp(turn.final.timestamp)}\n${answer || `处理失败：${failure}`}`;
+  if (!user || (!answer && !failure)) return [];
+  return [
+    { text: `[User] ${formatTimestamp(turn.user.timestamp)}`, bold: true },
+    { text: user },
+    { text: '' },
+    { text: `[Agent] ${formatTimestamp(turn.final.timestamp)}`, bold: true },
+    { text: answer || `处理失败：${failure}` },
+    { text: '' },
+  ];
+}
+
+/** 同步消息行数组的总 UTF-8 字节数 */
+function rowsByteLength(rows: SyncRow[]): number {
+  return rows.reduce((total, row) => total + Buffer.byteLength(row.text, 'utf8'), 0);
 }
 
 export function parseSyncCount(value: string | undefined): number | undefined | null {

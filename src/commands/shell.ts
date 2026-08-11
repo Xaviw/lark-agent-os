@@ -6,6 +6,19 @@ import { commandOutputMarkdown, elapsedSince } from '../utils/format.js';
 import { createCardUpdater, createThrottledUpdate } from '../utils/card-update.js';
 import { commandFinalCard, commandRunningCard, commandStartingCard } from '../cards.js';
 
+/**
+ * 平台感知的 shell 解析（纯函数，便于独立验证）：
+ * - Windows：固定 cmd.exe（/d 禁 AutoRun、/s 剥离首尾引号、/c 执行命令），减少回退成本；
+ * - macOS / Linux 等 POSIX：沿用 $SHELL（如 /bin/zsh），缺省 /bin/sh（-lc 登录 shell 执行）。
+ * 注：Windows 回退 cmd.exe 后 POSIX 命令（ls 等）不可用，需使用 cmd 语法（dir 等）；输出编码以 cmd 默认代码页为准。
+ */
+export function resolveShell(): { shell: string; args: string[] } {
+  if (process.platform === 'win32') {
+    return { shell: 'cmd.exe', args: ['/d', '/s', '/c'] };
+  }
+  return { shell: process.env.SHELL?.trim() || '/bin/sh', args: ['-lc'] };
+}
+
 export async function startShellCommand(
   ctx: AppContext,
   chatId: string,
@@ -29,13 +42,14 @@ export async function runShellCommand(
   timeoutSeconds?: number,
   background = false,
 ): Promise<void> {
-  const shell = process.env.SHELL?.trim() || '/bin/sh';
+  const { shell, args } = resolveShell();
   let child: ChildProcess;
   try {
-    child = spawn(shell, ['-lc', command], {
+    child = spawn(shell, [...args, command], {
       cwd,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

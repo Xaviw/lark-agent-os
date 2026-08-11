@@ -9,6 +9,14 @@ import { ensureAutoBaseline, markFeishuOrigin, syncComputerSessions } from './sy
  * fs.watch + 60s 轮询兜底 + 750ms 防抖 + 双 stat 校验 + 指数退避 ≤3 次。
  * 交叉引用：Agent 忙碌判定通过 attach 注入（main.ts 中指向 AgentRunManager.isActive，避免模块循环依赖）。
  */
+/**
+ * 会话文件名匹配（纯函数，便于独立验证）：Windows / macOS 文件系统大小写不敏感，
+ * fs.watch 事件报告的文件名大小写可能与存储路径不一致，比较时忽略大小写；Linux 保持精确匹配。
+ */
+export function sameSessionFilename(base: string, changed: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'linux' ? base === changed : base.toLowerCase() === changed.toLowerCase();
+}
+
 export class SessionSyncWatcher {
   private readonly watchers = new Map<string, FSWatcher>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
@@ -40,7 +48,14 @@ export class SessionSyncWatcher {
       chats.add(chatId);
       active.set(directory, chats);
       const fileStat = await stat(binding.activeSessionFile).catch(() => undefined);
-      if (fileStat) this.fileStats.set(binding.activeSessionFile, `${fileStat.size}:${fileStat.mtimeMs}`);
+      if (fileStat) {
+        this.fileStats.set(binding.activeSessionFile, `${fileStat.size}:${fileStat.mtimeMs}`);
+      } else {
+        // 换机/路径失效：会话文件在当前环境不存在。跳过基线与来源标记处理（sessionBranchEntries 内部的
+        // SessionManager.open 会在旧路径下 mkdir 重建目录树、产生空壳目录），由用户重新绑定项目或切换 session 恢复。
+        console.warn(`[session watch] ${chatId}: 会话文件不存在（${binding.activeSessionFile}），已跳过处理；若项目路径在当前环境不可用，请重新绑定项目或创建项目群。`);
+        continue;
+      }
       const inFlight = binding.inFlightFeishuRun;
       if (inFlight?.sessionFile === binding.activeSessionFile) {
         await markFeishuOrigin(this.ctx, chatId, inFlight.sessionFile, new Set(inFlight.beforeEntryIds), inFlight.prompt);
@@ -57,13 +72,21 @@ export class SessionSyncWatcher {
     }
     for (const directory of active.keys()) {
       if (this.watchers.has(directory)) continue;
-      const watcher = watch(directory, { persistent: true }, (_eventType, filename) => {
-        if (!filename) return;
-        const changed = String(filename);
-        for (const [chatId, binding] of Object.entries(this.ctx.state.all())) {
-          if (binding.activeSessionFile && dirname(binding.activeSessionFile) === directory && basename(binding.activeSessionFile) === changed) this.schedule(chatId);
-        }
-      });
+      let watcher: FSWatcher;
+      try {
+        watcher = watch(directory, { persistent: true }, (_eventType, filename) => {
+          if (!filename) return;
+          const changed = String(filename);
+          for (const [chatId, binding] of Object.entries(this.ctx.state.all())) {
+            if (binding.activeSessionFile && dirname(binding.activeSessionFile) === directory && sameSessionFilename(basename(binding.activeSessionFile), changed)) this.schedule(chatId);
+          }
+        });
+      } catch (error) {
+        // 目录不存在或不可监听（如切换机器后旧路径失效）：跳过监听（避免启动崩溃），
+        // 轮询兜底与后续 reconcile（重绑/切换 session）会在路径恢复后重新建立监听。
+        console.warn(`[session watch] ${directory}: 无法监听（目录不存在或不可访问），已跳过：${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
       watcher.on('error', (error) => {
         console.warn(`[session watch] ${directory}:`, error);
         watcher.close();

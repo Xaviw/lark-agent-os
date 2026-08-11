@@ -118,7 +118,7 @@
 
 **普通模式**
 
-- `spawn($SHELL, ['-lc', cmd])`，在群绑定工作路径执行。
+- `spawn(shell, [...args, cmd])`，在群绑定工作路径执行；shell 平台感知（`resolveShell`）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；输出编码以 cmd 默认代码页为准），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；spawn 带 `windowsHide: true`。
 - 执行中卡片**流式节流更新**：stdout/stderr `data` 事件触发 750ms 节流，**stdout/stderr 原样**原位刷新卡片；**无「查看输出」按钮**，仅「停止」。
 - 结束：最终卡 = 已流式显示的累计输出 + **追加状态消息**（`\n\n命令执行完成。` / `命令执行失败（退出码 N，信号 S）。` / `命令超时（N 秒）并已停止。` / `命令已手动停止。`），标题保留状态文本；输出统一使用可容纳内嵌反引号的动态长度 code fence。
 - 停止：进程组 SIGTERM → 5s 未退 SIGKILL（Windows 退化为单进程 kill）；点击停止后先追加「正在停止命令」。
@@ -147,7 +147,7 @@
 **自动同步**
 
 - 监听活动 session 文件所在目录（`fs.watch`）+ 60s 轮询大小 / mtime 兜底；变化 750ms 防抖。
-- 群无进行中飞书任务（`agentRuns.isActive` 与 `inFlightFeishuRun` 均空）时，同步**最新完成一轮**电脑端对话，格式 `[User] 时间戳 … / [Agent] 时间戳 …` + 状态栏（可选）。
+- 群无进行中飞书任务（`agentRuns.isActive` 与 `inFlightFeishuRun` 均空）时，同步**最新完成一轮**电脑端对话：标题行 `[User] 时间戳` / `[Agent] 时间戳` **加粗**，每条消息内容后跟**空行**；post 行结构（每行独立 text 元素，不经 md 解析）+ 状态栏（可选）。
 - 当多个群共享同一 `activeSessionFile` 时，忙碌判定按 session 文件维度执行：任一绑定群存在 Agent run 或飞书 in-flight 轮次，所有绑定群均暂缓自动同步；run 完成后统一重新调度这些群。
 - 同步前两次 stat 校验（间隔 100ms），不一致视为写入中，指数退避重试（最多 3 次）。
 
@@ -164,7 +164,7 @@
 **超长处理**
 
 - 同步消息体按 UTF-8 **字节数**判断（飞书富文本上限 30 KB，预留转义 / md 标签膨胀余量取 **28 KB**）。
-- 超限**截断 + 说明**后发送：头 1/3 + 「（同步内容过长，内容已截断）」 + 尾 2/3；按字节控制、按字符切分（避免多字节乱码）；`sent` 计数不变，toast「已同步 N 轮（内容已截断）」；自动 / 手动同步均适用。
+- 超限**截断 + 说明**后发送：按**行**分配预算（头 1/3 行 + 截断说明行 + 尾 2/3 行），头部与尾部至少各保留 1 行（最新轮次优先保留在尾部）；极端超长单行退化为**字符级截断**（按码点切分，避免多字节乱码）；`sent` 计数不变，toast「已同步 N 轮（内容已截断）」；自动 / 手动同步均适用。
 
 **失败轮次**
 
@@ -240,7 +240,7 @@ lark-agent-os（单进程 + 实例锁）
 
 - 飞书应用：启用机器人消息事件（WebSocket）；`im:chat`（建群）；群公告 Docx API 需在群内且具公告编辑权限（群主 / 管理员限定群需额外权限）。
 - pi SDK：读取本机 `~/.pi/agent` 的 provider / model / auth 配置。
-- 命令执行：`$SHELL`（默认 `/bin/sh`）。
+- 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`、POSIX `$SHELL`（默认 `/bin/sh`）。
 
 ---
 

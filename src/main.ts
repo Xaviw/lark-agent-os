@@ -63,7 +63,9 @@ channel.on({
       return await handleCardAction(ctx, event);
     } catch (error) {
       console.error('[cardAction]', error);
-      return { toast: { type: 'error', content: '操作失败，请重新打开 session 选择器。' } };
+      // 兜底文案携带真实错误信息便于定位，不再误导为 session 过期问题；toast 有长度上限（200 字符），截断展示
+      const detail = error instanceof Error ? error.message : String(error);
+      return { toast: { type: 'error', content: `操作失败：${detail}`.slice(0, 200) } };
     }
   },
 });
