@@ -61,7 +61,7 @@
 - 消息带 `replyToMessageId` 时抓取被引用消息：文本 / post 消息截断 12,000 字符后与发送者以 `<quoted_context>` 注入 prompt（纯附件类消息的 normalize 占位不注入）；抓取失败 → 回复原因，本轮不进 agent。
 - 被引用消息带资源（图片 / 文件 / 音视频 / 贴纸）时下载到 `<LARK_STATE_DIR>/media`（sha256 命名、同内容复用、mtime LRU 清理，容量上限 `LARK_MEDIA_CACHE_MAX_BYTES` 默认 512MB，下载超时 30s）。**下载在后台异步进行**：消息到达**立即**发「Agent 等待处理」卡（不等文件下载完成），附件就绪后才进入 agent 执行并流式更新；任一附件下载失败 / 超限 → 任务卡以「Agent 处理失败」结束，本轮不进 agent。
 - 注入分级：`image/*` 且 ≤10MB 且当前模型支持视觉输入（Model.input 含 image）→ 以 base64 图片附件随 prompt 注入（模型可直接查看）；其余（含超限 / 不支持视觉的图片）→ 注入文件名、大小、mime、本地路径，由 agent 自行读取（会话默认启用 read / bash 等工具）。
-- 获取失败（`fetchMessage` 抛错）或内容为空 → **不进入 agent 流程**（不建 run、不设 `inFlightFeishuRun`），以 markdown 回复「无法处理引用消息：<原因>」。
+- 获取失败（`fetchMessage` 抛错）或内容为空 → **不进入 agent 流程**（不建 run、不设 `inFlightFeishuRun`），以 markdown 回复固定原因「无法读取被引用的消息。」（错误码 1069307 无权限时给专门提示），内部错误详情只进日志。
 - 边界：引用消息过长时注入截断版本并标注。
 
 ### 2.2 Session 管理
