@@ -34,18 +34,19 @@
 | `src/config.ts` | env 解析（`LARK_*`）+ 业务常量（`*_LIMIT` / `*_INTERVAL_MS` / `SYNC_*`） |
 | `src/app-context.ts` | `AppContext` 类型：全局共享依赖（state / pi / api / lark / 任务容器 / agentRuns / sessionSyncWatcher） |
 | `src/types.ts` | 共享类型（`ChatBinding` / `SessionSyncState` / `AgentRun` / `CommandTask` / `BackgroundTask` / `ComputerTurn` 等） |
-| `src/pi.ts` | `PiSessions`：pi SDK 封装（prompt / abort / models / thinkingLevel / rename / compact / status / statusAt）；`statusFor` 状态栏；构造可注入 `backgroundTaskCountProvider` |
+| `src/pi.ts` | `PiSessions`：pi SDK 封装（按 sessionFile 串行写操作、32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / status / statusAt）；`statusFor` 状态栏；构造可注入 `backgroundTaskCountProvider` |
 | `src/cards.ts` | 全部飞书卡片 schema（JSON 2.0：help / 表单 / 选择器 / 状态卡 / `bgTaskListCard`） |
 | `src/state.ts` | `StateStore`：state.json 原子写入（tmp + rename、串行 flush）、旧字段迁移 |
 | `src/lark-api.ts` | tenant token 缓存 + 群公告 Docx API |
 | `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡） |
 | `src/agent/prompt.ts` | `runPrompt` / `promptWithReplyContext` / `useNewSession`（引用消息上下文、飞书来源标记） |
 | `src/commands/shell.ts` | 命令执行（`$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`） |
-| `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `sessionEntryIds` / `extractText`（纯函数） |
+| `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `extractText`（纯函数） |
 | `src/sync/select-turns.ts` | `selectSyncTurns`：方案 B 轮次选择（纯函数） |
 | `src/sync/truncate.ts` | `truncateSyncBody`：28KB 字节截断（纯函数） |
 | `src/sync/sync-service.ts` | `syncComputerSessions` / `ensureAutoBaseline` / `markFeishuOrigin` / `workspaceForChat` |
 | `src/sync/watcher.ts` | `SessionSyncWatcher`：fs.watch + 轮询 + 防抖 + 退避（电脑端 → 飞书单向同步） |
+| `src/utils/instance-lock.ts` | 原子发布 PID 实例锁、存活探测、陈旧锁清理与属主校验释放 |
 | `src/lark/messages.ts` | `handleMessage` + 私聊绑定 / 项目创建 / help / session 选择卡 |
 | `src/lark/card-actions.ts` | `handleCardAction`：全部 cmd 分支 + 表单解析（`cardFormValue` / `cardFormFlag` / toast / `parseCommandTimeout`） |
 | `src/announcement.ts` | 群公告 Docx 更新 + session 元数据读取 |
@@ -56,16 +57,16 @@
 
 - **卡片交互**：全部为 JSON 2.0（`schema: '2.0'`）。按钮 `behaviors: [{ type: 'callback', value: { cmd, ... } }]`；表单用 `form` 容器 + `input` / `checker`（V7.9+）。`cardFormValue` 只取 string 值并 trim；布尔字段（checker）用 `cardFormFlag` 单独读取。卡片操作带 `nonce` 防过期。
 - **卡片更新**：`createCardUpdater`（pending + 单飞队列串行化 + 失败重试一次）；**事件驱动节流**（750ms，非轮询）——agent 预览与命令输出共用该模式（`createThrottledUpdate`）。内容限制：卡片 6000 字符（`limitedMarkdown` 头 1/3 + 尾），命令输出内存 30KB。
-- **Agent 队列状态机**：每群串行 `queued → running → succeeded / failed / cancelled`（含 `stopping`）；停止过渡卡带 `run.latestOutput`；`inFlightFeishuRun` 记录飞书来源轮次，结束后 `markFeishuOrigin` 即时标记。
-- **命令执行**：`$SHELL -lc` 于群绑定 cwd；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
+- **Agent 队列状态机**：每群串行 `queued → running → succeeded / failed / cancelled`（含 `stopping`）；停止过渡卡带 `run.latestOutput`；`inFlightFeishuRun.beforeEntryIds` 在 sessionFile 锁内、SDK prompt 前采集并持久化，结束后按精确新增 ids 即时标记飞书来源。
+- **命令执行**：`$SHELL -lc` 于群绑定 cwd；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新，输出中的反引号由动态长度 code fence 包裹；Agent 最终回答保留 Markdown 原文；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
 - **会话同步（方向不对称）**：
-  - 电脑端 → 飞书：`SessionSyncWatcher`（fs.watch + 60s 轮询 + 750ms 防抖 + 双 stat 校验 + 指数退避 ≤3 次）单向推送；
+  - 电脑端 → 飞书：`SessionSyncWatcher`（fs.watch + 60s 轮询 + 750ms 防抖 + 双 stat 校验 + 指数退避 ≤3 次）单向推送；同一 `activeSessionFile` 被多个群绑定时，任一群的 Agent / 飞书轮次都会让所有绑定群暂缓同步，完成后统一重新调度；
   - 飞书 → 电脑端：**无推送**，pi SDK 直接写共享 session JSONL，电脑端 resume 可见；
   - 防回环（方案 B）：`selectSyncTurns` 把飞书轮次视为已消费并推进进度，`feishuOriginEntryIds` 消费即清理（O(1)，`slice(-1000)` 仅兜底）；
   - 超长：同步消息体按 **28KB（UTF-8 字节）** 截断 + 说明（飞书富文本上限 30KB，错误码 230025）。
 - **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护。
-- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / announcementRevision / updatedAt`。
-- **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试。
+- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / updatedAt`。
+- **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试；启动获取锁时会清理同目录中已确认所属进程退出的候选 `.tmp` 文件。
 
 ## 命名与代码约定
 

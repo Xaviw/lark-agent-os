@@ -17,6 +17,7 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
 
   const command = text.replace(/^<at>.*?<\/at>\s*/i, '').trim();
   if (command === '/help') return showHelp(ctx, message.chatId, message.messageId);
+  if (!command) return; // 纯 @ 无文本 / 空消息不触发 agent
   if (command.startsWith('/')) {
     await ctx.lark.send(message.chatId, { markdown: '飞书仅支持 `/help` 文本命令，其他操作请在操作面板中完成。' }, { replyTo: message.messageId });
     return;

@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type { NormalizedMessage } from '@larksuite/channel';
 import type { AppContext } from '../app-context.js';
 import { REPLY_CONTEXT_MAX_LENGTH } from '../config.js';
-import { sessionEntryIds } from '../sync/session-entries.js';
 import { workspaceForChat } from '../sync/sync-service.js';
 import { updateAnnouncement } from '../announcement.js';
 
@@ -25,10 +24,8 @@ export async function runPrompt(ctx: AppContext, message: NormalizedMessage, tex
     await ctx.lark.send(message.chatId, { markdown: `无法处理引用消息：${error}` }, { replyTo: message.messageId });
     return;
   }
-  const before = new Set(await sessionEntryIds(binding.activeSessionFile));
-  ctx.state.update(message.chatId, { inFlightFeishuRun: { sessionFile: binding.activeSessionFile, beforeEntryIds: [...before], prompt } });
-  await ctx.state.flush();
-  await ctx.agentRuns.submit(message, workspaceForChat(ctx, message.chatId), binding.activeSessionFile, prompt, before, prompt);
+  const runId = randomUUID();
+  await ctx.agentRuns.submit(message, workspaceForChat(ctx, message.chatId), binding.activeSessionFile, prompt, runId);
 }
 
 export async function promptWithReplyContext(ctx: AppContext, message: NormalizedMessage, text: string): Promise<{ prompt: string; error?: string }> {
@@ -38,7 +35,7 @@ export async function promptWithReplyContext(ctx: AppContext, message: Normalize
     const content = replied?.content.trim();
     if (!replied || !content) return { prompt: text, error: '引用消息内容为空或不存在。' };
     const excerpt = content.length > REPLY_CONTEXT_MAX_LENGTH
-      ? `${content.slice(0, REPLY_CONTEXT_MAX_LENGTH)}\n[引用消息已截断]`
+      ? `${Array.from(content).slice(0, REPLY_CONTEXT_MAX_LENGTH).join('')}\n[引用消息已截断]`
       : content;
     const sender = replied.senderName?.trim() || replied.senderId;
     return { prompt: `<reply_context>\n回复消息发送者: ${sender}\n${excerpt}\n</reply_context>\n\n${text}` };

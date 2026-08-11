@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { piAutoRetryMaxRetries } from '../config.js';
 import type { ComputerTurn, SessionMessageEntry } from '../types.js';
@@ -62,15 +61,6 @@ export function completedComputerTurns(entries: MessageEntry[]): ComputerTurn[] 
 
 export function sessionBranchEntries(file: string, cwd: string): SessionMessageEntry[] {
   return SessionManager.open(file, undefined, cwd).getBranch() as unknown as SessionMessageEntry[];
-}
-
-export async function sessionEntryIds(file: string): Promise<string[]> {
-  try {
-    return (await readFile(file, 'utf8')).trim().split('\n').filter(Boolean)
-      .map((line) => JSON.parse(line) as { type?: string; id?: string })
-      .filter((entry) => entry.type === 'message' && typeof entry.id === 'string')
-      .map((entry) => entry.id!);
-  } catch { return []; }
 }
 
 export function extractText(content: unknown): string {

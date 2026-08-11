@@ -1,3 +1,5 @@
+import { retryOnce } from './utils/retry.js';
+
 const DOMAIN = 'https://open.feishu.cn';
 
 interface TokenResponse { tenant_access_token?: string; }
@@ -44,13 +46,29 @@ export class LarkApi {
   }
 
   private async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+    // 仅网络层失败 / HTTP 5xx 重试一次；业务错误码（含限流 429、消息体超限 230025 等）不重试
+    return retryOnce(
+      () => this.requestOnce(path, method, body),
+      isRetryableRequestError,
+      500,
+      (error) => console.debug(`[lark api retry] ${method} ${path}:`, error),
+    );
+  }
+
+  private async requestOnce(path: string, method = 'GET', body?: unknown): Promise<any> {
     const response = await fetch(`${DOMAIN}${path}`, {
       method,
       headers: { Authorization: `Bearer ${await this.accessToken()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (!response.ok && response.status >= 500) {
+      // 5xx 先抛出（body 可能非 JSON），走重试；4xx 等继续解析业务错误码（不重试）
+      throw new Error(`Feishu API ${path}: HTTP ${response.status} ${response.statusText}`);
+    }
     const payload = await response.json() as any;
-    if (!response.ok || payload.code !== 0) throw new Error(`Feishu API ${path}: ${payload.code} ${payload.msg}`);
+    if (!response.ok || payload.code !== 0) {
+      throw new Error(`Feishu API ${path}: ${payload.code} ${payload.msg}`);
+    }
     return payload;
   }
 
@@ -66,4 +84,11 @@ export class LarkApi {
     this.tokenExpiresAt = Date.now() + ((payload.expire ?? 7200) - 60) * 1000;
     return this.token;
   }
+}
+
+/** 是否可重试：网络层失败（fetch 抛 TypeError）或 HTTP 5xx 服务端错误；业务错误码不重试 */
+function isRetryableRequestError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /HTTP [5]\d\d/.test(message);
 }

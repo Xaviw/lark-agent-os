@@ -1,6 +1,5 @@
 import 'dotenv/config';
-import { mkdir, open, readFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createLarkChannel } from '@larksuite/channel';
 import { StateStore } from './state.js';
@@ -14,6 +13,7 @@ import { SessionSyncWatcher } from './sync/watcher.js';
 import { handleMessage } from './lark/messages.js';
 import { handleCardAction } from './lark/card-actions.js';
 import { updateAnnouncement } from './announcement.js';
+import { acquireInstanceLock } from './utils/instance-lock.js';
 
 // ── 启动引导：env → 单实例锁 → state / 容器 ────────────────────────────────
 await mkdir(stateRoot, { recursive: true });
@@ -23,7 +23,7 @@ await state.load();
 const pending = new Map<string, PendingEntry>();
 const backgroundTasks = new Map<string, BackgroundTask>();
 const commandTasks = new Map<string, CommandTask>();
-const pi = new PiSessions(state, () => backgroundTasks.size);
+const pi = new PiSessions(() => backgroundTasks.size);
 const api = new LarkApi(appId, appSecret);
 
 const channel = createLarkChannel({
@@ -43,7 +43,13 @@ const agentRuns = new AgentRunManager(ctx);
 ctx.agentRuns = agentRuns;
 const sessionSyncWatcher = new SessionSyncWatcher(ctx);
 ctx.sessionSyncWatcher = sessionSyncWatcher;
-agentRuns.attach({ onRunFinished: (chatId) => sessionSyncWatcher.schedule(chatId) });
+agentRuns.attach({
+  onRunFinished: (_chatId, sessionFile) => {
+    for (const [chatId, binding] of Object.entries(state.all())) {
+      if (binding.activeSessionFile === sessionFile) sessionSyncWatcher.schedule(chatId);
+    }
+  },
+});
 sessionSyncWatcher.attach({ isAgentActive: (chatId) => agentRuns.isActive(chatId) });
 // 组装不变量：以下消费方（如 syncComputerSessions 的 ctx.agentRuns 访问）都依赖回填完成；
 // 显式校验让「组装顺序被破坏」在启动期即报错，而不是运行期静默 undefined 崩溃
@@ -83,27 +89,8 @@ async function shutdown(): Promise<void> {
     await pi.dispose();
     await state.flush();
     await channel.disconnect();
-    await instanceLock.close();
+    await instanceLock.release();
     process.exit(0);
   })();
   return shutdownPromise;
-}
-
-async function acquireInstanceLock(file: string): Promise<FileHandle> {
-  try {
-    const handle = await open(file, 'wx');
-    await handle.writeFile(`${process.pid}\n`, 'utf8');
-    return handle;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    try {
-      const pid = Number.parseInt((await readFile(file, 'utf8')).trim(), 10);
-      if (Number.isInteger(pid) && pid > 0) process.kill(pid, 0);
-      throw new Error(`Another lark-agent-os instance is already running (pid ${pid || 'unknown'})`);
-    } catch (probeError) {
-      if ((probeError as NodeJS.ErrnoException).code !== 'ESRCH') throw probeError;
-      await import('node:fs/promises').then(({ unlink }) => unlink(file));
-      return acquireInstanceLock(file);
-    }
-  }
 }

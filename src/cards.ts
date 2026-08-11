@@ -1,15 +1,19 @@
 import type { SessionInfo } from '@earendil-works/pi-coding-agent';
 import type { PiModelOption } from './pi.js';
+import { escapeCommand, formatTimestamp, markdownCodeBlock } from './utils/format.js';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 const CARD_MARKDOWN_LIMIT = 6_000;
+const SESSION_PICKER_LIMIT = 10;
 
 function limitedMarkdown(content: string): string {
   if (content.length <= CARD_MARKDOWN_LIMIT) return content;
   const marker = '\n\n（内容已截断）\n\n';
   const remaining = CARD_MARKDOWN_LIMIT - marker.length;
   const head = Math.floor(remaining / 3);
-  return `${content.slice(0, head)}${marker}${content.slice(-(remaining - head))}`;
+  // 按码点（Array.from）切分，避免切断多字节字符（emoji 等）产生乱码
+  const chars = Array.from(content);
+  return `${chars.slice(0, head).join('')}${marker}${chars.slice(chars.length - (remaining - head)).join('')}`;
 }
 
 export function sessionDisplayName(session: Pick<SessionInfo, 'name' | 'firstMessage'>): string {
@@ -24,13 +28,15 @@ export function sessionDisplayName(session: Pick<SessionInfo, 'name' | 'firstMes
 }
 
 export function sessionPickerCard(cwd: string, sessions: SessionInfo[], nonce: string): object {
+  const limited = sessions.slice(0, SESSION_PICKER_LIMIT);
+  const overflowHint = sessions.length > SESSION_PICKER_LIMIT ? `\n\n已显示前 ${SESSION_PICKER_LIMIT} 个（共 ${sessions.length} 个），其余可用「新建会话」或直接发消息让机器人处理。` : '';
   return {
     schema: '2.0',
     config: { summary: { content: '恢复 pi session' } },
     body: {
       elements: [
-        { tag: 'markdown', content: `**恢复 Session**\n\n项目：\`${cwd}\`\n\n请选择要继续的历史 session。` },
-        ...sessions.map((session) => ({
+        { tag: 'markdown', content: `**恢复 Session**\n\n项目：\`${cwd}\`\n\n请选择要继续的历史 session。${overflowHint}` },
+        ...limited.map((session) => ({
           tag: 'button',
           text: { tag: 'plain_text', content: `${sessionDisplayName(session)} · ${session.messageCount} 条` },
           type: 'primary',
@@ -112,7 +118,7 @@ export function thinkingLevelPickerCard(thinkingLevels: string[], nonce: string)
 
 export function agentQueuedCard(taskId: string, prompt: string): object {
   return { schema: '2.0', config: { summary: { content: 'Agent 等待处理' } }, body: { elements: [
-    { tag: 'markdown', content: limitedMarkdown(`**Agent 等待处理**\n\n请求：${prompt}\n\n状态：排队中`) },
+    { tag: 'markdown', content: limitedMarkdown(`**Agent 等待处理**\n\n请求：${escapeCommand(prompt)}\n\n状态：排队中`) },
     { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'agent.stop', taskId } }] },
   ] } };
 }
@@ -120,7 +126,7 @@ export function agentQueuedCard(taskId: string, prompt: string): object {
 export function agentRunningCard(taskId: string, prompt: string, output?: string): object {
   const response = output ? `\n\n${output}` : '';
   return { schema: '2.0', config: { summary: { content: 'Agent 正在处理' } }, body: { elements: [
-    { tag: 'markdown', content: limitedMarkdown(`**Agent 正在处理**\n\n请求：${prompt}\n\n状态：执行中${response}`) },
+    { tag: 'markdown', content: limitedMarkdown(`**Agent 正在处理**\n\n请求：${escapeCommand(prompt)}\n\n状态：执行中${response}`) },
     { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'agent.stop', taskId } }] },
   ] } };
 }
@@ -177,7 +183,7 @@ export function commandStartingCard(command: string, cwd: string, timeoutSeconds
 
 export function commandRunningCard(taskId: string, command: string, cwd: string, timeoutSeconds?: number, output?: string): object {
   const timeout = timeoutSeconds ? `\n超时：${timeoutSeconds} 秒` : '';
-  const latestOutput = output ? `\n\n${output.slice(-8_000)}` : '';
+  const latestOutput = output ? `\n\n${markdownCodeBlock(output.slice(-8_000))}` : '';
   return { schema: '2.0', config: { summary: { content: '命令正在执行' } }, body: { elements: [
     { tag: 'markdown', content: limitedMarkdown(`**命令正在执行**\n\n\`$ ${escapeCommand(command)}\`\n工作路径：\`${cwd}\`\n状态：执行中${timeout}${latestOutput}`) },
     { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'command.stop', taskId } }] },
@@ -208,19 +214,6 @@ export function bgTaskListCard(tasks: Array<{ id: string; command: string; start
     return { tag: 'button', text: { tag: 'plain_text', content: `停止：${label}` }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'bgTask.stop', taskId: task.id } }] };
   });
   return { schema: '2.0', config: { summary: { content: '后台任务' } }, body: { elements: [header, ...(stopButtons.length > 0 ? [{ tag: 'hr' }, ...stopButtons] : [])] } };
-}
-
-/** 命令转义：防止用户输入的反引号 / 换行破坏卡片 markdown 渲染 */
-export function escapeCommand(command: string): string {
-  return command.replace(/`/g, '\\`').replace(/[\r\n]+/g, ' ').trim();
-}
-
-/** 时间格式化：兼容 number / string / 非法值（非法时显示占位） */
-export function formatTimestamp(timestamp: unknown): string {
-  const date = new Date(typeof timestamp === 'string' || typeof timestamp === 'number' ? timestamp : NaN);
-  if (Number.isNaN(date.getTime())) return '??-??-?? ??:??:??';
-  const pad = (value: number): string => String(value).padStart(2, '0');
-  return `${String(date.getFullYear()).slice(-2)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 export function bindProjectFormCard(baseCwd: string, bound: boolean): object {

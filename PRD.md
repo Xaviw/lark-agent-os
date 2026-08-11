@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 产品 | lark-agent-os（飞书 × pi coding agent 网关） |
-| 版本 | v2.0（现状实现 + 已确认变更合并后的**目标态**；变更来源：待修改.md 条目 1–12） |
+| 版本 | v2.0（现状实现 + 已确认变更合并后的**目标态**） |
 | 技术栈 | Node.js ≥ 22.19 / TypeScript / pnpm；`@larksuite/channel`（飞书 WebSocket）、`@earendil-works/pi-coding-agent`（pi SDK） |
 
 ---
@@ -53,7 +53,7 @@
 - 执行中：原位更新「Agent 正在处理」卡，以 **750ms 节流**刷新回复预览（事件驱动，无新输出不刷新），含停止按钮。
 - 停止：立即发过渡卡「正在停止 Agent」且**携带当前最新输出**（内容不丢失）；`pi.abort()` 完成后最终卡「Agent 已停止」= 完整输出 + 状态栏。过渡卡移除停止按钮，避免重复 abort。
 - 完成 / 失败：最终卡无按钮，标题含耗时（如"Agent 处理完成 - 耗时：23 秒"）；失败 = 已有输出 + 错误信息 + 状态栏。
-- 边界：停止后预览节流停止（`state !== running`）；多群并行、每群串行；服务关闭时统一停止并通知（见 2.8）。
+- 边界：停止后预览节流停止（`state !== running`）；多群并行、每群串行（同一 session 文件被多群共享时，prompt/compact/rename 等写操作跨群同样串行，按 sessionFile 锁）；服务关闭时统一停止并通知（见 2.8）。
 
 **回复引用上下文**
 
@@ -63,9 +63,9 @@
 
 ### 2.2 Session 管理
 
-- **绑定**：每群一个 `activeSessionFile`；群未绑定或未选 Session 时，首次普通消息自动弹 `新建会话` / `切换会话` 选择卡。
+- **绑定**：每群一个 `activeSessionFile`；已绑定但未选 Session 时，首次普通消息自动弹 `新建会话` / `切换会话` 选择卡（未绑定群先提示绑定，见 2.1）。
 - **新建**：名称必填；成功后发送确认消息、更新群公告；无历史 Session 时直接展示新建表单。
-- **恢复**：列表显示"显示名称 + 消息条数"；名称优先级：自定义名称 > 首条用户消息前 48 字符（超出 `…` 截断）> "未命名会话"；校验 Session 属于当前项目且存在；恢复后更新公告；若由普通消息触发则继续处理该消息。
+- **恢复**：列表显示"显示名称 + 消息条数"（最多显示前 10 个，超出提示可用新建会话或直接发消息处理）；名称优先级：自定义名称 > 首条用户消息前 48 字符（超出 `…` 截断）> "未命名会话"；校验 Session 属于当前项目且存在；恢复后更新公告；若由普通消息触发则继续处理该消息。
 - **重命名**：名称必填，换行折叠为空格；写入 session 文件并更新公告。
 - **压缩**：`session.compact()` 异步执行；**不刷新群公告**；失败时向群发送「Session 压缩失败：<原因>」（错误信息截断 200 字符）；成功静默。
   - 边界：compact 会中止进行中的 agent 任务（pi SDK 行为，接受不处理）；失败场景含 session 过小（"Nothing to compact"）、已压缩、模型无凭证。
@@ -89,7 +89,7 @@
 
 - 未绑定群：新增绑定；已绑定群：修改绑定（覆盖 `cwd`）；表单仅工作路径（必填）。
 - 表单标题按状态区分：「绑定项目」（未绑定）/「修改绑定」（已绑定）。
-- 提交成功后：`state.update({ cwd, chatType: 'group', activeSessionFile: undefined, sessionSync: undefined, feishuOriginEntryIds: undefined, inFlightFeishuRun: undefined, announcementRevision: undefined })` → `flush` → `reconcile` → 更新公告。
+- 提交成功后：`state.update({ cwd, chatType: 'group', activeSessionFile: undefined, sessionSync: undefined, feishuOriginEntryIds: undefined, inFlightFeishuRun: undefined })` → `flush` → `reconcile` → 更新公告。
 - 边界：清空 `activeSessionFile` 后下一条普通消息自动走 `新建会话` / `切换会话` 选择卡（与切换 Session 同策略）；**分支须在绑定检查（`if (!binding)`）之前**，未绑定群才能使用；p2p 不适用（固定默认工作区）。
 
 **私聊自动绑定**：私聊首条消息自动绑定 `LARK_DEFAULT_WORKSPACE`；已有绑定但路径不符则覆盖。
@@ -106,7 +106,7 @@
   Session: <session 显示名称>
   ```
 - 触发时机：切换 / 新建 / 恢复 / 重命名 Session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）。
-- 首条公告创建后置顶（pin）；私聊不维护；无公告编辑权限时降级为日志告警。
+- 首条公告创建后置顶（pin）；私聊不维护；无公告编辑权限时降级为日志告警。未选 Session 时（如改绑后）公告更新为占位内容（`Session: 未选择`），避免残留旧项目信息；**从未有过公告的群不创建占位公告**（避免未选 session 就置顶），首条公告仍由首次选 session 触发。
 
 ### 2.5 命令执行
 
@@ -120,7 +120,7 @@
 
 - `spawn($SHELL, ['-lc', cmd])`，在群绑定工作路径执行。
 - 执行中卡片**流式节流更新**：stdout/stderr `data` 事件触发 750ms 节流，**stdout/stderr 原样**原位刷新卡片；**无「查看输出」按钮**，仅「停止」。
-- 结束：最终卡 = 已流式显示的累计输出 + **追加状态消息**（`\n\n命令执行完成。` / `命令执行失败（退出码 N，信号 S）。` / `命令超时（N 秒）并已停止。` / `命令已手动停止。`），标题保留状态文本。
+- 结束：最终卡 = 已流式显示的累计输出 + **追加状态消息**（`\n\n命令执行完成。` / `命令执行失败（退出码 N，信号 S）。` / `命令超时（N 秒）并已停止。` / `命令已手动停止。`），标题保留状态文本；输出统一使用可容纳内嵌反引号的动态长度 code fence。
 - 停止：进程组 SIGTERM → 5s 未退 SIGKILL（Windows 退化为单进程 kill）；点击停止后先追加「正在停止命令」。
 - 超时：到点先更新最终卡再终止进程组。
 - 边界：输出内存截断 30 KB；卡片 6000 字符限制（头 1/3 + 尾部 + 截断标记）；spawn 失败提示「命令启动失败」；节流 + `createCardUpdater` 串行化防高频写卡。
@@ -148,14 +148,16 @@
 
 - 监听活动 session 文件所在目录（`fs.watch`）+ 60s 轮询大小 / mtime 兜底；变化 750ms 防抖。
 - 群无进行中飞书任务（`agentRuns.isActive` 与 `inFlightFeishuRun` 均空）时，同步**最新完成一轮**电脑端对话，格式 `[User] 时间戳 … / [Agent] 时间戳 …` + 状态栏（可选）。
+- 当多个群共享同一 `activeSessionFile` 时，忙碌判定按 session 文件维度执行：任一绑定群存在 Agent run 或飞书 in-flight 轮次，所有绑定群均暂缓自动同步；run 完成后统一重新调度这些群。
 - 同步前两次 stat 校验（间隔 100ms），不一致视为写入中，指数退避重试（最多 3 次）。
 
-**手动同步**：`sync` 表单可填轮数（正整数 ≤ 1000，留空全部）；toast 结果。
+**手动同步**：`sync` 表单可填轮数（正整数 ≤ 1000，留空全部）；toast 结果。若 compact 等操作导致旧进度 entry id 消失，本次仅清除失效游标并提示再次同步；再次同步从当前文件重新选择轮次，可能包含已发送历史，但不静默跳过未同步轮次。
 
 **防回环（方案 B）**
 
-- 进度（`lastSyncedEntryId`）推进到**已消费轮次**——无论被**发送**（电脑端轮次）还是被**排除**（飞书轮次）；从扫描范围末尾向前找第一个已消费轮次推进。
-- `feishuOriginEntryIds` 为**即时标记**：飞书 run 结束（`inFlightFeishuRun.beforeEntryIds` 对比）标记本轮 ids；同步消费后清理进度之前的 ids（状态 O(1)，`slice(-1000)` 仅作极端兜底）。
+- 进度（`lastSyncedEntryId`）推进到**已消费轮次**——无论被**发送**（电脑端轮次）还是被**排除**（飞书轮次）；从扫描范围末尾向前找第一个已消费轮次推进。手动重置时仅保留仍存在于当前 JSONL 的 `autoBaselineEntryId`，失效基线会清除。
+- `feishuOriginEntryIds` 为**即时标记**：飞书 run 结束后按 `inFlightFeishuRun.runId` 校验属主并标记本轮 ids（旧状态缺 runId 时兼容 `beforeEntryIds` 对比）；同步消费后清理进度之前的 ids（状态 O(1)，`slice(-1000)` 仅作极端兜底）。
+- `PiSessions.prompt()` 在 sessionFile 锁内、调用 SDK prompt 前采集并持久化 `beforeEntryIds`，完成后再捕获本轮实际新增 entry ids；正常路径使用精确新增 ids，`beforeEntryIds + prompt` 仅用于进程异常退出后的启动 reconcile，避免锁外并发写入导致同文本历史消息误配。
 - `from` = auto 时 `max(lastSynced, baseline)` / manual 时 `lastSynced`；auto 仅取最新一轮、manual 按 count 回溯——语义保持。
 - agent 运行中不触发自动同步；异常中断后服务启动时 reconcile 补标记未完成飞书轮次。
 
@@ -191,9 +193,9 @@
 | `LARK_PI_STATUS_ENABLED` | 否 | `true` | Agent 回复状态栏开关 |
 | `LARK_PI_RETRY_MAX_RETRIES` | 否 | `3` | 同步失败轮次可重试阈值 |
 
-**state.json**（原子写入：tmp + rename，串行防覆盖）：每群绑定 `cwd`、`chatType`、`activeSessionFile`、`feishuOriginEntryIds`（即时标记，见 2.6）、`sessionSync`（`autoBaselineEntryId` / `lastSyncedEntryId` / `lastLarkMessageId`）、`inFlightFeishuRun`、`announcementRevision`、`updatedAt`。旧版 `sessionFile` 字段自动清除。Session 内容由 pi SDK 持久化（JSONL）。
+**state.json**（原子写入：tmp + rename，串行防覆盖）：每群绑定 `cwd`、`chatType`、`activeSessionFile`、`feishuOriginEntryIds`（即时标记，见 2.6）、`sessionSync`（`autoBaselineEntryId` / `lastSyncedEntryId` / `lastLarkMessageId`）、`inFlightFeishuRun`、`updatedAt`。旧版 `sessionFile` 字段自动清除。Session 内容由 pi SDK 持久化（JSONL）。
 
-**单实例锁**：`instance.lock` 写 PID；进程存活则拒绝启动；持有进程已退出（ESRCH）自动清理重试。
+**单实例锁**：`instance.lock` 写 PID；进程存活则拒绝启动；持有进程已退出（ESRCH）自动清理重试；获取锁时清理同目录中已确认失主的 `.tmp` 候选文件，避免异常退出长期积累。
 
 **启动流程**：校验 env → 建目录加载 state → 获取锁 → 初始化 pi / 飞书通道 → 连接 → reconcile watcher 与 inFlight → 刷新已绑定群公告。
 
@@ -211,7 +213,7 @@
 lark-agent-os（单进程 + 实例锁）
   ├─ 事件分发：handleMessage / handleCardAction
   ├─ AgentRunManager：每群队列 + 状态机（750ms 节流预览）
-  ├─ PiSessions：pi SDK 封装（prompt / abort / models / thinkingLevel / rename / compact / status）
+  ├─ PiSessions：pi SDK 封装（sessionFile 串行锁 + 32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / status）
   ├─ SessionSyncWatcher：电脑端 → 飞书同步（watch + 轮询，方案 B 进度推进）
   ├─ 命令执行器：普通命令（流式输出）+ backgroundTasks（常驻任务）
   ├─ LarkApi：tenant token 缓存 + 群公告 Docx API

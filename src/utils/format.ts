@@ -1,12 +1,33 @@
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { COMMAND_OUTPUT_LIMIT } from '../config.js';
-import { escapeCommand } from '../cards.js';
+
+/** 命令转义：防止用户输入的反引号 / 换行破坏卡片 markdown 渲染 */
+export function escapeCommand(command: string): string {
+  return command.replace(/`/g, '\\`').replace(/[\r\n]+/g, ' ').trim();
+}
+
+/** 时间格式化：兼容 number / string / 非法值（非法时显示占位） */
+export function formatTimestamp(timestamp: unknown): string {
+  const date = new Date(typeof timestamp === 'string' || typeof timestamp === 'number' ? timestamp : NaN);
+  if (Number.isNaN(date.getTime())) return '??-??-?? ??:??:??';
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${String(date.getFullYear()).slice(-2)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 
 export function commandOutputMarkdown(command: string, stdout: string, stderr: string, limit = COMMAND_OUTPUT_LIMIT): string {
   const output = [stdout && `stdout:\n${stdout}`, stderr && `stderr:\n${stderr}`].filter(Boolean).join('\n\n');
-  const clipped = output.length > limit ? `${output.slice(-limit)}\n\n（输出已截断）` : output;
-  return clipped ? `\`$ ${escapeCommand(command)}\`\n\n\`\`\`text\n${clipped}\n\`\`\`` : `\`$ ${escapeCommand(command)}\`\n\n（当前没有输出）`;
+  // 尾部截断按码点（Array.from），避免切断多字节字符
+  const clipped = output.length > limit ? `${Array.from(output).slice(-limit).join('')}\n\n（输出已截断）` : output;
+  return clipped ? `\`$ ${escapeCommand(command)}\`\n\n${markdownCodeBlock(clipped)}` : `\`$ ${escapeCommand(command)}\`\n\n（当前没有输出）`;
+}
+
+/** 使用比内容中最长反引号序列更长的 fence，避免命令输出提前闭合 Markdown code block。 */
+export function markdownCodeBlock(content: string, language = 'text'): string {
+  let longest = 0;
+  for (const match of content.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}${language}\n${content}\n${fence}`;
 }
 
 export function elapsedSince(startedAt: number): string {

@@ -15,8 +15,7 @@ export interface ChatBinding {
   /** 飞书来源 entry id（防回环）。即时标记：飞书 run 结束时记录本轮 ids，同步消费（进度推进）后立即清理，仅极端情况保留最近 1000 条 */
   feishuOriginEntryIds?: string[];
   sessionSync?: SessionSyncState;
-  inFlightFeishuRun?: { sessionFile: string; beforeEntryIds: string[]; prompt: string };
-  announcementRevision?: number;
+  inFlightFeishuRun?: { runId?: string; sessionFile: string; beforeEntryIds: string[]; prompt: string };
   updatedAt: string;
 }
 
@@ -63,9 +62,9 @@ export type AgentRun = {
   startedAt: number;
   state: 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'cancelled';
   updater: CardUpdater;
-  stopStatus: () => void;
   originBefore?: Set<string>;
-  originPrompt?: string;
+  /** 本次 prompt 在 session 锁内实际创建的 message entry ids */
+  originEntryIds?: string[];
   stopRequested: boolean;
   latestOutput: string;
 };

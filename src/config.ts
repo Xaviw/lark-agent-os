@@ -24,5 +24,7 @@ export const COMMAND_CARD_OUTPUT_LIMIT = 6_000;
 export const COMMAND_CARD_UPDATE_INTERVAL_MS = 750;
 export const REPLY_CONTEXT_MAX_LENGTH = 12_000;
 export const AGENT_CARD_UPDATE_INTERVAL_MS = 750;
+export const PI_SESSION_CACHE_LIMIT = 32;
+export const INSTANCE_LOCK_INVALID_GRACE_MS = 5_000;
 export const SYNC_BODY_BYTE_LIMIT = 28 * 1024; // 飞书富文本 30KB 上限，为 JSON 转义 / md 标签膨胀预留余量
 export const SYNC_TRUNCATION_MARKER = '（同步内容过长，内容已截断）';

@@ -98,7 +98,6 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
       sessionSync: undefined,
       feishuOriginEntryIds: undefined,
       inFlightFeishuRun: undefined,
-      announcementRevision: undefined,
     });
     await ctx.state.flush();
     await ctx.sessionSyncWatcher.reconcile();
@@ -153,7 +152,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'thinkingLevel.form') {
     const sessionFile = requireActiveSession();
     if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    const thinkingLevels = await ctx.pi.thinkingLevels(event.chatId, cwd, sessionFile);
+    const thinkingLevels = await ctx.pi.thinkingLevels(cwd, sessionFile);
     if (thinkingLevels.length === 0) return toast('warning', '当前 model 不支持思考强度设置。');
     const nonce = createPending();
     await ctx.lark.send(event.chatId, { card: thinkingLevelPickerCard(thinkingLevels, nonce) });
@@ -171,6 +170,8 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     if (count === null) return toast('error', '同步条数必须是正整数。');
     const result = await syncComputerSessions(ctx, event.chatId, 'manual', count);
     if (result.retry) return toast('warning', 'Session 正在写入，请稍后重试。');
+    if (result.busy) return toast('warning', 'Agent 正在处理消息，请稍后再同步。');
+    if (result.progressReset) return toast('warning', 'Session 文件已更新（可能已压缩），同步进度已重置。请再次同步；结果可能包含已发送的历史轮次。');
     if (result.sent === 0) await ctx.lark.send(event.chatId, { markdown: '无待同步消息。' });
     return toast('success', result.sent ? `已同步 ${result.sent} 轮对话${result.truncated ? '（内容已截断）' : ''}。` : '无待同步消息。');
   }
@@ -183,7 +184,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'session.compact') {
     const sessionFile = requireActiveSession();
     if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    void ctx.pi.compact(event.chatId, cwd, sessionFile).catch((error) => {
+    void ctx.pi.compact(cwd, sessionFile).catch((error) => {
       console.error('[compact]', error);
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
       void ctx.lark.send(event.chatId, { markdown: `Session 压缩失败：${reason}` });
@@ -193,7 +194,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'model.select' && typeof value.provider === 'string' && typeof value.modelId === 'string') {
     const sessionFile = requireActiveSession();
     if (!sessionFile || !current) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
-    const selected = await ctx.pi.setModel(event.chatId, cwd, sessionFile, value.provider, value.modelId);
+    const selected = await ctx.pi.setModel(cwd, sessionFile, value.provider, value.modelId);
     ctx.pending.delete(event.chatId);
     void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已切换到 ${selected.provider}/${selected.name}。`);
@@ -201,8 +202,9 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'thinkingLevel.select' && typeof value.thinkingLevel === 'string') {
     const sessionFile = requireActiveSession();
     if (!sessionFile || !current) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
-    await ctx.pi.setThinkingLevel(event.chatId, cwd, sessionFile, value.thinkingLevel as PiThinkingLevel);
+    await ctx.pi.setThinkingLevel(cwd, sessionFile, value.thinkingLevel as PiThinkingLevel);
     ctx.pending.delete(event.chatId);
+    void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已设置思考强度：${value.thinkingLevel}。`);
   }
   if (cmd === 'session.rename.submit') {
@@ -210,7 +212,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     if (!sessionFile || !current) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
     const name = cardFormValue(event).name.replace(/[\r\n]+/g, ' ').trim();
     if (!name) return toast('error', '请填写 Session 名称。');
-    await ctx.pi.rename(event.chatId, cwd, sessionFile, name);
+    await ctx.pi.rename(cwd, sessionFile, name);
     ctx.pending.delete(event.chatId);
     void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已命名为 ${name}。`);

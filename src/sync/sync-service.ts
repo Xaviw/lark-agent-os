@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import type { AppContext } from '../app-context.js';
 import { SYNC_BODY_BYTE_LIMIT } from '../config.js';
-import { formatTimestamp } from '../cards.js';
+import { formatTimestamp } from '../utils/format.js';
 import type { ComputerTurn, SessionMessageEntry } from '../types.js';
 import { extractText, finalFailureMessage, isSessionMessageEntry, sessionBranchEntries } from './session-entries.js';
 import { selectSyncTurns } from './select-turns.js';
@@ -36,10 +36,10 @@ export async function syncComputerSessions(
   chatId: string,
   mode: 'auto' | 'manual',
   count?: number,
-): Promise<{ sent: number; retry?: boolean; truncated?: boolean }> {
-  if (ctx.agentRuns.isActive(chatId) || ctx.state.get(chatId)?.inFlightFeishuRun) return { sent: 0 };
+): Promise<{ sent: number; retry?: boolean; truncated?: boolean; busy?: boolean; progressReset?: boolean }> {
   const binding = ctx.state.get(chatId);
   if (!binding?.activeSessionFile) return { sent: 0 };
+  if (isSessionBusy(ctx, binding.activeSessionFile)) return { sent: 0, busy: true };
   const firstStat = await stat(binding.activeSessionFile).catch(() => undefined);
   await new Promise<void>((resolve) => setTimeout(resolve, 100));
   const secondStat = await stat(binding.activeSessionFile).catch(() => undefined);
@@ -58,6 +58,25 @@ export async function syncComputerSessions(
   const from = mode === 'auto'
     ? Math.max(indexOf(sync.lastSyncedEntryId), indexOf(sync.autoBaselineEntryId))
     : indexOf(sync.lastSyncedEntryId);
+  // 进度丢失（如 compact 重写文件后旧 entry id 已不存在）：先清除失效游标，本次不发送。
+  // 用户再次手动同步时将从当前文件重新选择轮次；这可能重发历史，但不会把未同步轮次静默标成已消费。
+  // 同时清理失效的飞书来源标记（旧 id 在重写后的文件中必然不存在，留只会无限累积）。
+  if (mode === 'manual' && sync.lastSyncedEntryId && from === -1) {
+    const autoBaselineEntryId = sync.autoBaselineEntryId && indexOf(sync.autoBaselineEntryId) !== -1
+      ? sync.autoBaselineEntryId
+      : undefined;
+    ctx.state.update(chatId, {
+      sessionSync: {
+        sessionFile: binding.activeSessionFile,
+        autoBaselineEntryId,
+        lastSyncedEntryId: undefined,
+        lastLarkMessageId: sync.lastLarkMessageId,
+      },
+      feishuOriginEntryIds: (binding.feishuOriginEntryIds ?? []).filter((id) => indexOf(id) !== -1),
+    });
+    await ctx.state.flush();
+    return { sent: 0, progressReset: true };
+  }
   const feishuOrigin = new Set(binding.feishuOriginEntryIds ?? []);
   // 方案 B：扫描 from 之后所有完整轮次，按来源分组（飞书轮次不发送但视为已消费，见 selectSyncTurns）
   const { selected, consumed } = selectSyncTurns(entries, from, feishuOrigin, mode, count);
@@ -97,6 +116,12 @@ export async function syncComputerSessions(
   return { sent: sentCount, truncated };
 }
 
+function isSessionBusy(ctx: AppContext, sessionFile: string): boolean {
+  if (ctx.agentRuns.isSessionActive(sessionFile)) return true;
+  return Object.values(ctx.state.all()).some((binding) => binding.activeSessionFile === sessionFile
+    && binding.inFlightFeishuRun?.sessionFile === sessionFile);
+}
+
 function formatComputerTurn(turn: ComputerTurn): string {
   const user = extractText(turn.user.message.content);
   const answer = turn.assistantMessages.map((entry) => extractText(entry.message.content)).filter(Boolean).join('\n\n');
@@ -125,6 +150,11 @@ export async function markFeishuOrigin(ctx: AppContext, chatId: string, sessionF
   const ids = entries.slice(start, end)
     .filter((entry) => entry.type === 'message' && typeof entry.id === 'string')
     .map((entry) => entry.id);
+  await markFeishuOriginEntries(ctx, sessionFile, ids);
+}
+
+/** 使用 prompt 持锁执行期间捕获的精确 entry ids 标记飞书来源，避免相同 prompt 的排队任务互相误认。 */
+export async function markFeishuOriginEntries(ctx: AppContext, sessionFile: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   for (const [id, binding] of Object.entries(ctx.state.all())) {
     if (binding.activeSessionFile !== sessionFile) continue;

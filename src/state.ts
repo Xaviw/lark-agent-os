@@ -16,7 +16,11 @@ export class StateStore {
       this.state = JSON.parse(await readFile(this.file, 'utf8')) as State;
       // The previous version bound one session per chat. Treat that path as
       // historical data so the next Feishu message goes through the chooser.
-      for (const binding of Object.values(this.state) as Array<ChatBinding & { sessionFile?: string }>) delete binding.sessionFile;
+      // announcementRevision 已被移除（公告 revision 改为每次现取），旧字段一并清理避免残留
+      for (const binding of Object.values(this.state) as Array<ChatBinding & { sessionFile?: string; announcementRevision?: number }>) {
+        delete binding.sessionFile;
+        delete binding.announcementRevision;
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }

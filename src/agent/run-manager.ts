@@ -5,9 +5,9 @@ import { AGENT_CARD_UPDATE_INTERVAL_MS } from '../config.js';
 import type { AgentRun } from '../types.js';
 import { agentFailureContent, elapsedSince } from '../utils/format.js';
 import { createCardUpdater } from '../utils/card-update.js';
+import { retryOnce } from '../utils/retry.js';
 import { agentFinalCard, agentQueuedCard, agentRunningCard } from '../cards.js';
-import { markFeishuOrigin } from '../sync/sync-service.js';
-import { updateAnnouncement } from '../announcement.js';
+import { markFeishuOriginEntries } from '../sync/sync-service.js';
 
 /**
  * 每群 Agent 串行队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡）。
@@ -17,12 +17,12 @@ export class AgentRunManager {
   private readonly runs = new Map<string, AgentRun>();
   private readonly queues = new Map<string, AgentRun[]>();
   private readonly current = new Map<string, AgentRun>();
-  private onRunFinished: ((chatId: string) => void) | undefined;
+  private onRunFinished: ((chatId: string, sessionFile: string) => void) | undefined;
 
   constructor(private readonly ctx: AppContext) {}
 
   /** 组装点注入：AgentRun 结束（含失败/取消）后回调（main.ts 中指向 SessionSyncWatcher.schedule） */
-  attach(deps: { onRunFinished: (chatId: string) => void }): void {
+  attach(deps: { onRunFinished: (chatId: string, sessionFile: string) => void }): void {
     this.onRunFinished = deps.onRunFinished;
   }
 
@@ -30,12 +30,16 @@ export class AgentRunManager {
     return (this.queues.get(chatId)?.length ?? 0) > 0 || this.current.has(chatId);
   }
 
-  async submit(message: NormalizedMessage, cwd: string, sessionFile: string, prompt: string, originBefore?: Set<string>, originPrompt?: string): Promise<void> {
-    const id = randomUUID();
+  isSessionActive(sessionFile: string): boolean {
+    return [...this.runs.values()].some((run) => run.sessionFile === sessionFile
+      && !['succeeded', 'failed', 'cancelled'].includes(run.state));
+  }
+
+  async submit(message: NormalizedMessage, cwd: string, sessionFile: string, prompt: string, id = randomUUID()): Promise<void> {
     const sent = await this.ctx.lark.send(message.chatId, { card: agentQueuedCard(id, prompt) }, { replyTo: message.messageId });
     const run: AgentRun = {
       id, chatId: message.chatId, cwd, sessionFile, prompt, messageId: sent.messageId, startedAt: Date.now(), state: 'queued',
-      updater: createCardUpdater(this.ctx.lark, sent.messageId, 'agent status'), stopStatus: () => undefined, originBefore, originPrompt, stopRequested: false, latestOutput: '',
+      updater: createCardUpdater(this.ctx.lark, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '',
     };
     this.runs.set(id, run);
     const queue = this.queues.get(run.chatId) ?? [];
@@ -47,16 +51,21 @@ export class AgentRunManager {
   stop(chatId: string, id: string): boolean {
     const run = this.runs.get(id);
     if (!run || run.chatId !== chatId || ['succeeded', 'failed', 'cancelled'].includes(run.state)) return false;
+    if (run.state === 'stopping') return true;
     run.stopRequested = true;
-    run.stopStatus();
     if (run.state === 'queued') {
       run.state = 'cancelled';
+      // 排队中取消：该 run 对应的 inFlightFeishuRun 不会经 execute.finally 清理，必须在此释放，
+      // 否则残留的 inFlight 会永久阻塞该群自动/手动同步（watcher.run 与 syncComputerSessions 均检查它）
+      if (this.clearInFlightIfOwned(run)) void this.ctx.state.flush().catch((error) => console.warn(`[feishu origin cleanup] ${run.chatId}:`, error));
       void this.finishWithStatus(run, 'Agent 已停止', '已在开始前取消。', 'agent stop status');
       return true;
     }
     run.state = 'stopping';
     void this.finishWithStatus(run, '正在停止 Agent', run.latestOutput || '正在停止处理。', 'agent stop status');
-    if (this.current.get(chatId)?.id === id) void this.ctx.pi.abort(chatId).catch((error) => console.error('[agent stop]', error));
+    // 过渡卡「正在停止 Agent」会在 abort 完成后的最终卡覆盖（createCardUpdater.finish 多次调用属预期契约）。
+    // 仅当该 run 是当前持锁执行者时 abort 才生效（pi.abort 按 runId 匹配）；等待锁中的 run 由 prompt 的 isCancelled 放弃执行
+    if (this.current.get(chatId)?.id === id) void this.ctx.pi.abort(run.sessionFile, run.id).catch((error) => console.error('[agent stop]', error));
     return true;
   }
 
@@ -64,13 +73,13 @@ export class AgentRunManager {
     const updates: Promise<void>[] = [];
     for (const run of this.runs.values()) {
       run.stopRequested = true;
-      run.stopStatus();
       if (run.state === 'queued') {
         run.state = 'cancelled';
+        this.clearInFlightIfOwned(run);
         updates.push(this.finishWithStatus(run, 'Agent 已停止', '服务关闭，任务未开始。', 'agent shutdown'));
       } else if (run.state === 'running' || run.state === 'stopping') {
         run.state = 'stopping';
-        void this.ctx.pi.abort(run.chatId).catch((error) => console.error('[agent shutdown]', error));
+        void this.ctx.pi.abort(run.sessionFile, run.id).catch((error) => console.error('[agent shutdown]', error));
         updates.push(this.finishWithStatus(run, 'Agent 已停止', '服务正在关闭。', 'agent shutdown'));
       }
     }
@@ -99,10 +108,9 @@ export class AgentRunManager {
           void this.finishWithStatus(run, run.stopRequested ? 'Agent 已停止' : 'Agent 处理失败', content, 'agent final status');
           console.error('[agent run]', error);
         } finally {
-          run.stopStatus();
           this.current.delete(chatId);
           this.runs.delete(run.id);
-          this.onRunFinished?.(chatId);
+          this.onRunFinished?.(chatId, run.sessionFile);
         }
       }
     } finally {
@@ -122,14 +130,29 @@ export class AgentRunManager {
       lastPreviewAt = Date.now();
       void run.updater.update(agentRunningCard(run.id, run.prompt, run.latestOutput)).catch((error) => console.warn('[agent preview status]', error));
     };
-    run.stopStatus = () => undefined;
     const isStopping = (): boolean => run.stopRequested;
     try {
-      const result = await this.ctx.pi.prompt(run.chatId, run.cwd, run.sessionFile, run.prompt, (text) => {
+      const result = await this.ctx.pi.prompt(run.cwd, run.sessionFile, run.prompt, (text) => {
         run.latestOutput = text;
         const delay = AGENT_CARD_UPDATE_INTERVAL_MS - (Date.now() - lastPreviewAt);
         if (delay <= 0) updatePreview();
         else if (!previewTimer) previewTimer = setTimeout(updatePreview, delay);
+      }, {
+        runId: run.id,
+        isCancelled: () => run.stopRequested,
+        onBeforeEntryIds: async (entryIds) => {
+          run.originBefore = new Set(entryIds);
+          this.ctx.state.update(run.chatId, {
+            inFlightFeishuRun: {
+              runId: run.id,
+              sessionFile: run.sessionFile,
+              beforeEntryIds: entryIds,
+              prompt: run.prompt,
+            },
+          });
+          await this.ctx.state.flush();
+        },
+        onEntryIds: (entryIds) => { run.originEntryIds = entryIds; },
       });
       if (previewTimer) clearTimeout(previewTimer);
       run.state = isStopping() ? 'cancelled' : 'succeeded';
@@ -137,29 +160,65 @@ export class AgentRunManager {
         ? agentFinalCard('Agent 已停止', run.latestOutput || '已停止处理。', result.status, elapsedSince(run.startedAt))
         : agentFinalCard('Agent 处理完成', result.answer, result.status, elapsedSince(run.startedAt));
       await run.updater.finish(card).catch((error) => console.warn('[agent final status]', error));
-      void updateAnnouncement(this.ctx, run.chatId);
     } catch (error) {
       run.state = isStopping() ? 'cancelled' : 'failed';
       const content = agentFailureContent(run.latestOutput, error, run.stopRequested);
-      const status = await this.ctx.pi.status(run.chatId, run.cwd, run.sessionFile).catch(() => undefined);
+      const status = await this.ctx.pi.status(run.cwd, run.sessionFile).catch(() => undefined);
       await run.updater.finish(agentFinalCard(run.stopRequested ? 'Agent 已停止' : 'Agent 处理失败', content, status, elapsedSince(run.startedAt))).catch((updateError) => console.warn('[agent final status]', updateError));
     } finally {
       if (previewTimer) clearTimeout(previewTimer);
       if (run.originBefore) {
-        try {
-          await markFeishuOrigin(this.ctx, run.chatId, run.sessionFile, run.originBefore, run.originPrompt);
-          this.ctx.state.update(run.chatId, { inFlightFeishuRun: undefined });
-          await this.ctx.state.flush();
-        } catch (error) {
-          console.warn(`[feishu origin] ${run.chatId}:`, error);
-        }
+        await this.markAndClearOrigin(run);
       }
-      run.stopStatus();
+    }
+  }
+
+  /**
+   * 清理与指定 run 对应的 inFlightFeishuRun（防回环标记的同步暂停保护）。
+   * 新状态按 runId 校验属主；旧状态无 runId 时兼容 beforeEntryIds 集合比对。返回是否清理。
+   */
+  private clearInFlightIfOwned(run: AgentRun): boolean {
+    const originBefore = run.originBefore;
+    if (!originBefore) return false;
+    const inFlight = this.ctx.state.get(run.chatId)?.inFlightFeishuRun;
+    if (!inFlight || inFlight.sessionFile !== run.sessionFile) return false;
+    if (inFlight.runId && inFlight.runId !== run.id) return false;
+    const before = inFlight.beforeEntryIds;
+    if (before.length !== originBefore.size || before.some((id) => !originBefore.has(id))) return false;
+    this.ctx.state.update(run.chatId, { inFlightFeishuRun: undefined });
+    return true;
+  }
+
+  private async markAndClearOrigin(run: AgentRun): Promise<void> {
+    try {
+      await retryOnce(
+        () => markFeishuOriginEntries(this.ctx, run.sessionFile, run.originEntryIds ?? []),
+        () => true,
+        500,
+        (error) => console.debug(`[feishu origin retry] ${run.chatId}:`, error),
+      );
+      // 属主判断后再清理：多个排队 run 时 inFlightFeishuRun 只记录最后一次 runPrompt 的 run，
+      // 较早 run 完成不得误清较晚 run 的 inFlight（否则其执行期间同步暂停保护会提前失效）
+      if (this.clearInFlightIfOwned(run)) await this.ctx.state.flush();
+    } catch (error) {
+      // 标记失败时保留 inFlight，避免本轮被当作电脑端轮次同步；延迟再尝试一次，仍失败则留待启动 reconcile。
+      console.warn(`[feishu origin] ${run.chatId}:`, error);
+      setTimeout(() => void this.retryOriginCleanup(run), 1_000).unref();
+    }
+  }
+
+  private async retryOriginCleanup(run: AgentRun): Promise<void> {
+    try {
+      await markFeishuOriginEntries(this.ctx, run.sessionFile, run.originEntryIds ?? []);
+      if (this.clearInFlightIfOwned(run)) await this.ctx.state.flush();
+      this.onRunFinished?.(run.chatId, run.sessionFile);
+    } catch (error) {
+      console.warn(`[feishu origin retry] ${run.chatId}:`, error);
     }
   }
 
   private async finishWithStatus(run: AgentRun, title: string, content: string, label: string): Promise<void> {
-    const status = await this.ctx.pi.status(run.chatId, run.cwd, run.sessionFile).catch(() => undefined);
+    const status = await this.ctx.pi.status(run.cwd, run.sessionFile).catch(() => undefined);
     const elapsed = this.current.get(run.chatId)?.id === run.id ? elapsedSince(run.startedAt) : undefined;
     await run.updater.finish(agentFinalCard(title, content, status, elapsed)).catch((error) => console.warn(`[${label}]`, error));
   }

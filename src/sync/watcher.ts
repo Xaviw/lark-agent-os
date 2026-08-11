@@ -98,6 +98,8 @@ export class SessionSyncWatcher {
       console.warn(`[session sync] ${chatId}:`, error);
     } finally {
       this.running.delete(chatId);
+      // 写入期间可能已有新的 dirty 标记；若定时器恰好在运行中触发，补排一次，避免丢事件。
+      if (this.dirty.has(chatId) && !this.timers.has(chatId)) this.schedule(chatId);
     }
   }
 
