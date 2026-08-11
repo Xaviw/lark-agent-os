@@ -20,6 +20,7 @@ import { retryOnce } from '../utils/retry.js';
 import { agentFinalCard, agentQueuedCard, agentRunningCard } from '../cards.js';
 import { markFeishuOriginEntries } from '../sync/sync-service.js';
 import { rememberCardThread } from '../lark/topics.js';
+import { sendChat } from '../lark/chat-lifecycle.js';
 
 /**
  * 每群 Agent 串行队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡）。
@@ -42,6 +43,13 @@ export class AgentRunManager {
     return (this.queues.get(chatId)?.length ?? 0) > 0 || this.current.has(chatId);
   }
 
+  /** 群失效清理：取消该群所有排队/执行中的 run（复用 stop 语义：queued → cancelled + inFlight 释放，running → abort + 停止卡） */
+  cancelChat(chatId: string): void {
+    for (const run of [...this.runs.values()]) {
+      if (run.chatId === chatId) this.stop(chatId, run.id);
+    }
+  }
+
   isSessionActive(sessionFile: string): boolean {
     return [...this.runs.values()].some((run) => run.sessionFile === sessionFile
       && !['succeeded', 'failed', 'cancelled'].includes(run.state));
@@ -49,12 +57,12 @@ export class AgentRunManager {
 
   async submit(message: NormalizedMessage, opts: SubmitRunOptions): Promise<void> {
     const id = opts.id ?? randomUUID();
-    const sent = await this.ctx.lark.send(message.chatId, { card: agentQueuedCard(id, opts.prompt) }, { replyTo: message.messageId });
+    const sent = await sendChat(this.ctx, message.chatId, { card: agentQueuedCard(id, opts.prompt) }, { replyTo: message.messageId });
     // 记录状态卡所在话题上下文：话题窗口内的 agent 卡后续「停止」操作直接命中缓存，免反查
     rememberCardThread(sent.messageId, message.threadId);
     const run: AgentRun = {
       id, chatId: message.chatId, cwd: opts.cwd, sessionFile: opts.sessionFile, prompt: opts.prompt, messageId: sent.messageId, startedAt: Date.now(), state: 'queued',
-      updater: createCardUpdater(this.ctx.lark, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '',
+      updater: createCardUpdater(this.ctx, message.chatId, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '',
       // 后台附件准备：提交时立即启动（与排队并行），execute 前 await；内部异常兑底为失败结果
       prepare: opts.prepare
         ? opts.prepare().catch((error) => ({ prompt: opts.prompt, error: `附件准备失败：${error instanceof Error ? error.message : String(error)}` }))

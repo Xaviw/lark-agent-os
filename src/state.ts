@@ -46,6 +46,13 @@ export class StateStore {
     return next;
   }
 
+  /** 删除 binding（群失效清理）；返回是否存在 */
+  delete(chatId: string): boolean {
+    if (!this.state[chatId]) return false;
+    delete this.state[chatId];
+    return true;
+  }
+
   flush(): Promise<void> {
     const write = this.flushQueue.then(async () => {
       await mkdir(dirname(this.file), { recursive: true });

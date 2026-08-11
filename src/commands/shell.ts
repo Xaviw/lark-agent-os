@@ -3,8 +3,9 @@ import type { AppContext } from '../app-context.js';
 import { COMMAND_CARD_OUTPUT_LIMIT, COMMAND_CARD_UPDATE_INTERVAL_MS, COMMAND_OUTPUT_LIMIT } from '../config.js';
 import type { CommandTask } from '../types.js';
 import { commandOutputMarkdown, elapsedSince } from '../utils/format.js';
-import { createCardUpdater, createThrottledUpdate } from '../utils/card-update.js';
+import { createCardUpdater, createThrottledUpdate, updateCardWithRetry } from '../utils/card-update.js';
 import { commandFinalCard, commandRunningCard, commandStartingCard } from '../cards.js';
+import { sendChat } from '../lark/chat-lifecycle.js';
 
 /**
  * 平台感知的 shell 解析（纯函数，便于独立验证）：
@@ -29,7 +30,7 @@ export async function startShellCommand(
   background = false,
   replyTo?: string,
 ): Promise<void> {
-  const sent = await ctx.lark.send(chatId, { card: commandStartingCard(command, cwd, timeoutSeconds) }, replyTo ? { replyTo } : undefined);
+  const sent = await sendChat(ctx, chatId, { card: commandStartingCard(command, cwd, timeoutSeconds) }, replyTo ? { replyTo } : undefined);
   await runShellCommand(ctx, chatId, cwd, command, taskId, sent.messageId, timeoutSeconds, background);
 }
 
@@ -54,7 +55,7 @@ export async function runShellCommand(
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    await ctx.lark.updateCard(messageId, commandFinalCard(`命令启动失败：${reason}`, commandOutputMarkdown(command, '', '', COMMAND_CARD_OUTPUT_LIMIT)));
+    await updateCardWithRetry(ctx, chatId, messageId, commandFinalCard(`命令启动失败：${reason}`, commandOutputMarkdown(command, '', '', COMMAND_CARD_OUTPUT_LIMIT)), 'command spawn failure');
     return;
   }
   // 后台（常驻）模式：忽略超时秒数；spawn 成功后立即完成本次任务卡，进程注册到 backgroundTasks（不进入 commandTasks，输出丢弃）
@@ -70,7 +71,7 @@ export async function runShellCommand(
     });
     child.stdout?.resume();
     child.stderr?.resume();
-    await ctx.lark.updateCard(messageId, commandFinalCard('后台任务已启动', commandOutputMarkdown(command, '', '', COMMAND_CARD_OUTPUT_LIMIT)));
+    await updateCardWithRetry(ctx, chatId, messageId, commandFinalCard('后台任务已启动', commandOutputMarkdown(command, '', '', COMMAND_CARD_OUTPUT_LIMIT)), 'background start status');
     return;
   }
   let stdout = '';
@@ -101,7 +102,7 @@ export async function runShellCommand(
   });
 
   task.messageId = messageId;
-  task.updater = createCardUpdater(ctx.lark, messageId, 'command status');
+  task.updater = createCardUpdater(ctx, chatId, messageId, 'command status');
   ctx.commandTasks.set(taskId, task);
   void task.updater.update(commandRunningCard(taskId, command, cwd, timeoutSeconds)).catch((error) => console.warn('[command start status]', error));
   const timeout = timeoutSeconds

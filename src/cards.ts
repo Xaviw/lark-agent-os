@@ -164,6 +164,13 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
   };
 }
 
+export function botWelcomeCard(cwd: string): object {
+  return { schema: '2.0', config: { summary: { content: '机器人已加入群聊' } }, body: { elements: [
+    { tag: 'markdown', content: `**机器人已就绪**\n\n已自动绑定工作路径：\`${cwd}\`\n\n在群里 \`@机器人\` 即可开始对话；\`/help\` 或下方按钮打开操作面板（新建/切换会话、执行命令、修改绑定等）。` },
+    { tag: 'button', text: { tag: 'plain_text', content: '打开操作面板' }, type: 'primary', behaviors: [{ type: 'callback', value: { cmd: 'help' } }] },
+  ] } };
+}
+
 export function commandFormCard(cwd: string): object {
   return { schema: '2.0', config: { summary: { content: '执行命令' } }, body: { elements: [
     { tag: 'markdown', content: `**执行命令**\n\n工作路径：\`${cwd}\`` },

@@ -7,6 +7,7 @@ import { resolveResource, type MediaResourceItem } from '../media/cache.js';
 import { workspaceForChat } from '../sync/sync-service.js';
 import { sessionFileForMessage } from '../lark/topics.js';
 import { updateAnnouncement } from '../announcement.js';
+import { sendChat } from '../lark/chat-lifecycle.js';
 import { escapeMarkdown } from '../utils/format.js';
 import type { PreparedPrompt, PromptImage } from '../types.js';
 
@@ -16,7 +17,7 @@ export async function useNewSession(ctx: AppContext, chatId: string, cwd: string
   await ctx.state.flush();
   await ctx.sessionSyncWatcher.reconcile();
   await updateAnnouncement(ctx, chatId);
-  await ctx.lark.send(chatId, { markdown: `已新建 session：\`${name}\`` });
+  await sendChat(ctx, chatId, { markdown: `已新建 session：\`${name}\`` });
 }
 
 /** 快段产物：不含附件段的 prompt 骨架 + 待下载资源列表 */
@@ -42,7 +43,7 @@ export async function runPrompt(ctx: AppContext, message: NormalizedMessage, tex
   // 换机/路径失效防护：cwd 或 session 文件在当前环境不存在时（如从其他机器迁移 state 后旧路径失效），
   // 直接进入 Agent 会让 pi SDK 在旧路径下 mkdir 重建目录树并把新对话写入错误位置；改为提示用户重新绑定。
   if (!(await workspacePathsExist(binding.cwd, sessionFile))) {
-    await ctx.lark.send(message.chatId, { markdown: '项目路径在当前环境下不存在，请重新绑定项目或创建项目群。' }, { replyTo: message.messageId });
+    await sendChat(ctx, message.chatId, { markdown: '项目路径在当前环境下不存在，请重新绑定项目或创建项目群。' }, { replyTo: message.messageId });
     return;
   }
   // 快段：模型视觉能力查询与引用上下文组装并行（均不下载附件）
@@ -52,7 +53,7 @@ export async function runPrompt(ctx: AppContext, message: NormalizedMessage, tex
   ]);
   if (!quoted.ok) {
     // 引用消息获取失败：不进入 agent 流程（不建 run、不设 inFlightFeishuRun），直接展示错误原因
-    await ctx.lark.send(message.chatId, { markdown: `无法处理引用消息：${quoted.error}` }, { replyTo: message.messageId });
+    await sendChat(ctx, message.chatId, { markdown: `无法处理引用消息：${quoted.error}` }, { replyTo: message.messageId });
     return;
   }
   const runId = randomUUID();

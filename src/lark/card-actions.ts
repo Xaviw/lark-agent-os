@@ -11,6 +11,8 @@ import { updateAnnouncement } from '../announcement.js';
 import { runPrompt, useNewSession } from '../agent/prompt.js';
 import { createProject } from './projects.js';
 import { cardThreadId, ensureThreadSession, rememberCardThread } from './topics.js';
+import { showHelp } from './messages.js';
+import { sendChat } from './chat-lifecycle.js';
 
 /** 话题内不可用的卡片操作（会话管理 / 项目绑定 / 同步属群级操作，help 已去入口，此处防旧卡/直连触发） */
 const TOPIC_BLOCKED_CMDS = new Set([
@@ -33,10 +35,16 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   };
   // 话题内响应回复到触发卡（保持在话题窗口内）；发送后记录新卡上下文，供后续操作直接命中缓存
   const send = async (input: SendInput): Promise<void> => {
-    const sent = await ctx.lark.send(event.chatId, input, (await resolveThread()) ? { replyTo: event.messageId } : undefined);
+    const sent = await sendChat(ctx, event.chatId, input, (await resolveThread()) ? { replyTo: event.messageId } : undefined);
     rememberCardThread(sent.messageId, threadId);
   };
   if (typeof cmd === 'string' && TOPIC_BLOCKED_CMDS.has(cmd) && (await resolveThread())) return toast('warning', '话题内不支持该操作，请回到群聊使用。');
+  // 欢迎卡「打开操作面板」按钮入口（复用 /help 路径；话题内也可打开裁剪版面板）
+  if (cmd === 'help') {
+    const tid = await resolveThread();
+    await showHelp(ctx, event.chatId, event.messageId, tid);
+    return toast('success', '已打开操作面板。');
+  }
   if (cmd === 'command.form') {
     if (!ctx.state.get(event.chatId)) return toast('error', '该群尚未绑定项目。');
     await send({ card: commandFormCard(workspaceForChat(ctx, event.chatId)) });

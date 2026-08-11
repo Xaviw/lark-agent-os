@@ -6,6 +6,7 @@ import type { ComputerTurn, SessionMessageEntry } from '../types.js';
 import { extractText, finalFailureMessage, isSessionMessageEntry, sessionBranchEntries } from './session-entries.js';
 import { selectSyncTurns } from './select-turns.js';
 import { truncateSyncRows } from './truncate.js';
+import { sendChat } from '../lark/chat-lifecycle.js';
 import type { SyncRow } from '../types.js';
 
 /** 群工作路径：私聊固定默认工作区；群聊取绑定 cwd，未绑定回退默认工作区 */
@@ -97,7 +98,7 @@ export async function syncComputerSessions(
         truncated = true;
       }
       const content = rows.map((row) => [{ tag: 'text', text: row.text, ...(row.bold ? { style: ['bold'] } : {}) }]);
-      const sent = await ctx.lark.send(chatId, { post: { zh_cn: { title: '', content } } });
+      const sent = await sendChat(ctx, chatId, { post: { zh_cn: { title: '', content } } });
       sentMessageId = sent.messageId;
       sentCount = selected.length;
     }

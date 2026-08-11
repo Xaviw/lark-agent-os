@@ -34,6 +34,7 @@
 - 机器人自身消息不处理（防自触发）。
 - 消息类型分流（依据 `rawContentType`）：`text` / `post` / `interactive` 按文本处理；`sticker` 静默忽略；`image` / `file` / `audio` / `video` 不直接进入 agent，回复轻提示「已收到 ✅ 引用（回复）该文件并附上需求，即可让我处理」，用户「引用（回复）」该消息并附文字后处理（见「引用附件」）。
 - 群未绑定项目 → 回复"该群尚未绑定项目，请使用 `/help` 中的「绑定项目」"。
+- 机器人被加入群聊（`im.chat.member.bot.added_v1`，main.ts 接线 `handleBotAdded`）：自动绑定默认工作区（后续可通过「修改绑定」更换）并发送欢迎卡（含「打开操作面板」按钮，cmd `help`）；重复加群（binding 已存在）仅补发欢迎卡、不覆盖已有绑定。
 - 话题窗口（thread）消息：事件 `chat_id` 与原会话相同、额外带 `thread_id`。话题消息优先走**话题独立 session**（见「话题窗口（thread）」），不依赖主会话 activeSessionFile（主会话未选 Session 不影响话题）。
 
 **`/help` 操作面板**
@@ -216,6 +217,11 @@
 
 **优雅关闭（SIGINT / SIGTERM）**：终止 `commandTasks` 与 `backgroundTasks`（进程组 SIGTERM → 5s SIGKILL）→ 关闭 watcher → 停止 agent 任务（排队取消、执行中 abort，1.5s 内发送「服务正在关闭」卡）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
 - 已知竞态：`process.exit(0)` 可能先于 SIGKILL 兜底定时器，忽略 SIGTERM 的进程可能残留。
+
+**群生命周期（机器人被移出群 / 群解散）**：SDK 未订阅 `bot.removed` / `disbanded` 事件，以外向发送失败信号驱动清理（`src/lark/chat-lifecycle.ts`）：
+- 触发点：全部 `lark.send`（经 `sendChat` 包装）、卡片更新（`updateCardWithRetry`）、群公告 API 失败；
+- 判定（纯函数 `isChatUnreachable`）：错误码 `target_revoked` 仅对无 replyTo 的发送生效（避免回复目标消息被删误伤），或错误文本命中群级特征（`10030` 机器人不在会话 / `232009` 群已解散 / 机器人不在 / 群不存在）；消息级错误（10020 消息不存在、230001 参数错误）不命中；
+- 清理（幂等 `cleanupChat`）：取消该群 Agent run（排队取消 + 执行中 abort）→ 终止前台命令 → 清 pending（含话题 key）→ `sessionSyncWatcher.forget` + reconcile → 删除 binding；后台任务不按群索引（无 chatId 字段）、全局保留。用户重新加回机器人后需重新绑定（群聊）；私聊失效清理后下次消息自动重建绑定。
 
 ---
 

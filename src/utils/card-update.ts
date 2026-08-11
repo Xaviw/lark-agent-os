@@ -1,5 +1,6 @@
-import type { LarkChannel } from '@larksuite/channel';
+import type { AppContext } from '../app-context.js';
 import type { CardUpdater } from '../types.js';
+import { handleChatGone } from '../lark/chat-lifecycle.js';
 import { retryOnce } from './retry.js';
 
 /** 事件驱动节流：intervalMs 内至多立即触发一次，其余排队到间隔末尾；cancel 取消挂起触发 */
@@ -20,7 +21,7 @@ export function createThrottledUpdate(fn: () => void, intervalMs: number): { tri
   return { trigger, cancel };
 }
 
-export function createCardUpdater(lark: LarkChannel, messageId: string, label: string): CardUpdater {
+export function createCardUpdater(ctx: AppContext, chatId: string, messageId: string, label: string): CardUpdater {
   let pendingCard: object | undefined;
   let updatePromise: Promise<void> | undefined;
   let finishTail: Promise<void> = Promise.resolve();
@@ -32,7 +33,7 @@ export function createCardUpdater(lark: LarkChannel, messageId: string, label: s
       while (!finished && pendingCard) {
         const card = pendingCard;
         pendingCard = undefined;
-        await updateCardWithRetry(lark, messageId, card, label);
+        await updateCardWithRetry(ctx, chatId, messageId, card, label);
       }
     })().finally(() => {
       updatePromise = undefined;
@@ -58,7 +59,7 @@ export function createCardUpdater(lark: LarkChannel, messageId: string, label: s
     const next = finishTail
       .catch((error) => console.warn(`[${label}] previous finish failed`, error))
       .then(() => previous.catch((error) => console.warn(`[${label}] previous update failed`, error)))
-      .then(() => updateCardWithRetry(lark, messageId, card, label));
+      .then(() => updateCardWithRetry(ctx, chatId, messageId, card, label));
     finishTail = next;
     return next;
   };
@@ -66,17 +67,24 @@ export function createCardUpdater(lark: LarkChannel, messageId: string, label: s
   return { update, finish };
 }
 
-export async function updateCardWithRetry(lark: LarkChannel, messageId: string, card: object, label: string): Promise<void> {
+export async function updateCardWithRetry(ctx: AppContext, chatId: string, messageId: string, card: object, label: string): Promise<void> {
   try {
     // 卡片更新对所有错误都重试一次（网络抖动/限流均属可重试，与 lark-api 的业务错误码判定不同）
     await retryOnce(
-      () => lark.updateCard(messageId, card),
+      () => ctx.lark.updateCard(messageId, card),
       () => true,
       500,
       (error) => console.debug(`[${label}] card update retry:`, error),
     );
   } catch (error) {
     console.warn(`[${label}] card update failed`, error);
+    // 卡片更新失败可能是群已失效（机器人被移出 / 群解散）——判定命中则清理该群（卡片更新失败多为消息级问题，不误伤）；
+    // 清理失败隔离记录，原错误继续上抛（错误链保持真实）
+    try {
+      await handleChatGone(ctx, chatId, error, false);
+    } catch (cleanupError) {
+      console.warn(`[chat lifecycle] ${chatId}: 卡片更新清理失败`, cleanupError);
+    }
     throw error;
   }
 }

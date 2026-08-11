@@ -104,6 +104,18 @@ export class SessionSyncWatcher {
     }
   }
 
+  /** 群失效清理：停止该 chatId 的挂起调度（timer / dirty / retries）并清除其会话文件 stat 缓存；运行中的 run 由 binding 删除自然退出（syncComputerSessions 开头检查） */
+  forget(chatId: string): void {
+    const timer = this.timers.get(chatId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(chatId);
+    this.dirty.delete(chatId);
+    this.retries.delete(chatId);
+    // 多群共享同一会话文件时删除 stat 缓存仅让其他群下次 poll 重建（无害），避免失效群残留陈旧条目
+    const sessionFile = this.ctx.state.get(chatId)?.activeSessionFile;
+    if (sessionFile) this.fileStats.delete(sessionFile);
+  }
+
   schedule(chatId: string): void {
     this.dirty.add(chatId);
     const existing = this.timers.get(chatId);

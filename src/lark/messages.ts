@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type { NormalizedMessage } from '@larksuite/channel';
+import type { BotAddedEvent, NormalizedMessage } from '@larksuite/channel';
 import type { AppContext } from '../app-context.js';
 import { ATTACHMENT_MESSAGE_TYPES } from '../config.js';
 import type { PiSessions } from '../pi.js';
 import type { ChatBinding } from '../types.js';
-import { createSessionFormCard, helpCard, sessionPickerCard } from '../cards.js';
+import { botWelcomeCard, createSessionFormCard, helpCard, sessionPickerCard } from '../cards.js';
 import { workspaceForChat } from '../sync/sync-service.js';
 import { rememberCardThread } from './topics.js';
+import { handleChatGone, sendChat } from './chat-lifecycle.js';
 import { runPrompt } from '../agent/prompt.js';
 
 /** 消息入口：私聊自动绑定默认工作区；群聊需 @bot 或 /help */
@@ -23,7 +24,8 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
   const kind = message.rawContentType;
   if (kind === 'sticker') return;
   if (kind && ATTACHMENT_MESSAGE_TYPES.has(kind)) {
-    await ctx.lark.send(
+    await sendChat(
+      ctx,
       message.chatId,
       { markdown: '已收到 ✅ 引用（回复）该文件并附上需求，即可让我处理' },
       { replyTo: message.messageId },
@@ -35,13 +37,13 @@ export async function handleMessage(ctx: AppContext, message: NormalizedMessage)
   if (command === '/help') return showHelp(ctx, message.chatId, message.messageId, message.threadId);
   if (!command) return; // 纯 @ 无文本 / 空消息不触发 agent
   if (command.startsWith('/')) {
-    await ctx.lark.send(message.chatId, { markdown: '飞书仅支持 `/help` 文本命令，其他操作请在操作面板中完成。' }, { replyTo: message.messageId });
+    await sendChat(ctx, message.chatId, { markdown: '飞书仅支持 `/help` 文本命令，其他操作请在操作面板中完成。' }, { replyTo: message.messageId });
     return;
   }
   const binding = ctx.state.get(message.chatId);
   const cwd = workspaceForChat(ctx, message.chatId);
   if (!binding) {
-    await ctx.lark.send(message.chatId, { markdown: '该群尚未绑定项目，请使用 `/help` 中的「绑定项目」。' }, { replyTo: message.messageId });
+    await sendChat(ctx, message.chatId, { markdown: '该群尚未绑定项目，请使用 `/help` 中的「绑定项目」。' }, { replyTo: message.messageId });
     return;
   }
   // 话题消息优先：使用话题独立 session（懒初始化在 runPrompt 内部完成），不依赖主会话 activeSessionFile
@@ -82,9 +84,9 @@ async function bindDirectChat(ctx: AppContext, chatId: string): Promise<ChatBind
   return binding;
 }
 
-async function showHelp(ctx: AppContext, chatId: string, replyTo?: string, threadId?: string): Promise<void> {
+export async function showHelp(ctx: AppContext, chatId: string, replyTo?: string, threadId?: string): Promise<void> {
   const binding = ctx.state.get(chatId);
-  const sent = await ctx.lark.send(chatId, { card: helpCard(workspaceForChat(ctx, chatId), Boolean(binding), Boolean(binding?.activeSessionFile), threadId ? 'topic' : 'group') }, replyTo ? { replyTo } : undefined);
+  const sent = await sendChat(ctx, chatId, { card: helpCard(workspaceForChat(ctx, chatId), Boolean(binding), Boolean(binding?.activeSessionFile), threadId ? 'topic' : 'group') }, replyTo ? { replyTo } : undefined);
   rememberCardThread(sent.messageId, threadId);
 }
 
@@ -99,6 +101,24 @@ async function showSessionSetup(
   const card = sessions.length === 0
     ? createSessionFormCard(nonce, '新建 Session')
     : sessionPickerCard(workspaceForChat(ctx, message.chatId), sessions, nonce);
-  const sent = await ctx.lark.send(message.chatId, { card }, { replyTo: message.messageId });
+  const sent = await sendChat(ctx, message.chatId, { card }, { replyTo: message.messageId });
   rememberCardThread(sent.messageId, undefined); // 选择卡仅出现在普通消息路径（无话题），记录以命中后续卡片操作缓存
+}
+
+/**
+ * 机器人被加入群聊（im.chat.member.bot.added_v1）：自动绑定默认工作区（后续可通过「修改绑定」更换）
+ * 并发送欢迎卡；重复加群（binding 已存在）仅补发欢迎卡、不覆盖已有绑定。
+ */
+export async function handleBotAdded(ctx: AppContext, event: BotAddedEvent): Promise<void> {
+  const chatId = event.chatId;
+  if (!ctx.state.get(chatId)) {
+    ctx.state.set(chatId, { cwd: ctx.defaultWorkspace, chatType: 'group', updatedAt: new Date().toISOString() });
+    await ctx.state.flush();
+  }
+  try {
+    await sendChat(ctx, chatId, { card: botWelcomeCard(workspaceForChat(ctx, chatId)) });
+  } catch (error) {
+    // 欢迎卡发送失败（含判定群不可达后的清理）不致命，记录日志
+    console.warn(`[botAdded] ${chatId}: 欢迎卡发送失败`, error);
+  }
 }

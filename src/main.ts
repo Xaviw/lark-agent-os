@@ -10,7 +10,7 @@ import type { BackgroundTask, CommandTask, PendingEntry } from './types.js';
 import type { AppContext } from './app-context.js';
 import { AgentRunManager } from './agent/run-manager.js';
 import { SessionSyncWatcher } from './sync/watcher.js';
-import { handleMessage } from './lark/messages.js';
+import { handleMessage, handleBotAdded } from './lark/messages.js';
 import { handleCardAction } from './lark/card-actions.js';
 import { updateAnnouncement } from './announcement.js';
 import { acquireInstanceLock } from './utils/instance-lock.js';
@@ -58,6 +58,8 @@ if (!ctx.agentRuns || !ctx.sessionSyncWatcher) throw new Error('AppContext 组�
 // ── 事件接线 ──────────────────────────────────────────────────────────────
 channel.on({
   message: (message) => void handleMessage(ctx, message).catch((error) => console.error('[message]', error)),
+  // 机器人被加入群聊：自动绑定默认工作区 + 欢迎卡（见 handleBotAdded）；失败不致命，仅日志
+  botAdded: (event) => void handleBotAdded(ctx, event).catch((error) => console.error('[botAdded]', error)),
   cardAction: async (event) => {
     try {
       return await handleCardAction(ctx, event);

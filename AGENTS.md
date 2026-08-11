@@ -35,23 +35,24 @@
 | `src/app-context.ts` | `AppContext` 类型：全局共享依赖（state / pi / api / lark / 任务容器 / agentRuns / sessionSyncWatcher） |
 | `src/types.ts` | 共享类型（`ChatBinding` / `SessionSyncState` / `AgentRun` / `CommandTask` / `BackgroundTask` / `ComputerTurn` 等） |
 | `src/pi.ts` | `PiSessions`：pi SDK 封装（按 sessionFile 串行写操作、32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / status / statusAt）；`statusFor` 状态栏；构造可注入 `backgroundTaskCountProvider` |
-| `src/cards.ts` | 全部飞书卡片 schema（JSON 2.0：help / 表单 / 选择器 / 状态卡 / `bgTaskListCard`） |
-| `src/state.ts` | `StateStore`：state.json 原子写入（tmp + rename、串行 flush）、旧字段迁移 |
+| `src/cards.ts` | 全部飞书卡片 schema（JSON 2.0：help / 欢迎卡 / 表单 / 选择器 / 状态卡 / `bgTaskListCard`） |
+| `src/state.ts` | `StateStore`：state.json 原子写入（tmp + rename、串行 flush）、`delete(chatId)`（群失效清理）、旧字段迁移 |
 | `src/lark-api.ts` | tenant token 缓存 + 群公告 Docx API |
-| `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡） |
+| `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡）；`cancelChat(chatId)`（群失效清理：复用 stop 语义） |
 | `src/agent/prompt.ts` | `runPrompt` / `promptWithReplyContext` / `useNewSession`（引用消息上下文、飞书来源标记） |
 | `src/commands/shell.ts` | 命令执行（平台感知 shell：Windows `cmd.exe /d /s /c`、POSIX `$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`） |
 | `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `extractText`（纯函数） |
 | `src/sync/select-turns.ts` | `selectSyncTurns`：方案 B 轮次选择（纯函数） |
 | `src/sync/truncate.ts` | `truncateSyncRows`：28KB 按行截断（纯函数，头 1/3 行 + 尾 2/3 行，超长单行退化为字符截断） |
 | `src/sync/sync-service.ts` | `syncComputerSessions` / `ensureAutoBaseline` / `markFeishuOrigin` / `workspaceForChat` |
-| `src/sync/watcher.ts` | `SessionSyncWatcher`：fs.watch + 轮询 + 防抖 + 退避（电脑端 → 飞书单向同步） |
+| `src/sync/watcher.ts` | `SessionSyncWatcher`：fs.watch + 轮询 + 防抖 + 退避（电脑端 → 飞书单向同步）；`forget(chatId)`（群失效清理挂起调度） |
 | `src/utils/instance-lock.ts` | 原子发布 PID 实例锁、存活探测、陈旧锁清理与属主校验释放 |
-| `src/lark/messages.ts` | `handleMessage` + 私聊绑定 / 项目创建 / help / session 选择卡 |
+| `src/lark/chat-lifecycle.ts` | 群生命周期：`isChatUnreachable`（群不可达判定，纯函数）/ `sendChat`（发送 + 群失效兜底）/ `handleChatGone` / `cleanupChat`（幂等清理：取消 agent run、终止命令、清 pending、停同步、删 binding） |
+| `src/lark/messages.ts` | `handleMessage` + 私聊绑定 / `handleBotAdded`（加群自动绑定 + 欢迎卡）/ help / session 选择卡 |
 | `src/lark/topics.ts` | 话题（thread）支持层：懒初始化独立 session（`ensureThreadSession`）、消息会话解析（`sessionFileForMessage`）、卡片消息反查 threadId（`cardThreadId`，带缓存） |
 | `src/lark/card-actions.ts` | `handleCardAction`：全部 cmd 分支 + 表单解析（`cardFormValue` / `cardFormFlag` / toast / `parseCommandTimeout`） |
 | `src/announcement.ts` | 群公告 Docx 更新 + session 元数据读取 |
-| `src/utils/card-update.ts` | `createCardUpdater` / `updateCardWithRetry` / `createThrottledUpdate` |
+| `src/utils/card-update.ts` | `createCardUpdater` / `updateCardWithRetry`（带 chatId，失败时判定群失效）/ `createThrottledUpdate` |
 | `src/utils/format.ts` | `commandOutputMarkdown` / `elapsedSince` / `agentFailureContent` / `defaultProjectName` / `resolveWorkspacePath`（纯函数） |
 
 ## 关键机制（代码事实，维护时勿偏离）
@@ -68,6 +69,8 @@
   - 同步消息格式：post 行结构（每行独立 `text` 元素，**不经 md 解析**——md 会把 `\n\n` 折叠为单换行、内容特殊字符会被解析）；`[User]/[Agent]` 时间戳标题行带 `style: ['bold']` 加粗，每条消息后跟一个空 `text` 行渲染为可见空白行（实测确认）。
 - **话题窗口（thread）**：话题消息事件与原会话共享 `chat_id`、带 `threadId`。话题内首次 @bot（群）/任意消息（私聊）懒初始化**独立 session**（`src/lark/topics.ts` 的 `ensureThreadSession`，命名 `话题-MM-DD HH:mm`，in-flight 守卫 + 双检防并发重复创建）并绑定 `binding.threadSessions[threadId]`；话题对话不写入主会话、不依赖主会话 activeSessionFile。**cardAction 事件无 threadId**——优先命中**发送侧记录**（`rememberCardThread`：本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage` 反查（`cardThreadId`，in-flight 守卫、失败不缓存按非话题处理）；`handleCardAction` 内**惰性反查**（`resolveThread`，`agent.stop` / `command.stop` 零反查）。话题语义：会话 = 话题 session（切换模型 / 思考强度 / 重命名 / 压缩作用于话题 session）、**不触发公告**（懒初始化与各 updateAnnouncement 调用点均跳过）、**不参与电脑端同步**（watcher 只监听 activeSessionFile，reconcile 仅清理话题 inFlight 不标记）、help 话题模式去「新建会话 / 切换会话 / 绑定项目 / 同步消息」且工作路径固定不可改、群级 cmd 直接拒绝（`TOPIC_BLOCKED_CMDS` 含 session.sync.*，防旧卡 / 直连）。话题内卡片响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡——`startShellCommand` 带 replyTo）；`pending` 按会话隔离（key = `chatId:threadId`）。
 - **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护；**话题内操作不触发**。
+- **群生命周期（`src/lark/chat-lifecycle.ts`）**：SDK 无 `bot.removed` / `disbanded` 事件订阅，以**外向发送失败信号**驱动清理——所有 `ctx.lark.send` 统一走 `sendChat` 包装（无 replyTo 时 `target_revoked` 视为群不可达；带 replyTo 仅匹配错误文本特征，防回复目标消息被删误伤），卡片更新（`updateCardWithRetry`）与群公告 API 失败同样判定（`isChatUnreachable` 纯函数：`10030` / `232009` / 已解散 / 机器人不在 / 群不存在）；命中即 `cleanupChat`（幂等）：取消该群 agent run（`cancelChat` 复用 stop 语义）→ 终止前台命令 → 清 pending（含话题 key）→ `watcher.forget` + reconcile → `state.delete`。后台任务不按群索引（`BackgroundTask` 无 chatId），不清理。
+- **加群欢迎（botAdded）**：main.ts 接线 `im.chat.member.bot.added_v1` → `handleBotAdded`：无 binding 时自动绑定默认工作区（后续可「修改绑定」）并发欢迎卡（`botWelcomeCard`，按钮 cmd `help` → `handleCardAction` 的 `help` 分支复用 `showHelp`）；binding 已存在仅补发欢迎卡。
 - **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / threadSessions（话题 threadId → { sessionFile, updatedAt }）/ updatedAt`。
 - **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试；启动获取锁时会清理同目录中已确认所属进程退出的候选 `.tmp` 文件。
 

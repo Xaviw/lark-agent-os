@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import type { AppContext } from './app-context.js';
 import { sessionDisplayName } from './cards.js';
+import { handleChatGone } from './lark/chat-lifecycle.js';
 
 const announcementQueues = new Map<string, Promise<void>>();
 
@@ -46,7 +47,16 @@ async function updateAnnouncementOnce(ctx: AppContext, chatId: string): Promise<
     } else {
       await ctx.api.updateAnnouncement(chatId, announcement.revision_id, textBlock.block_id, content);
     }
-  } catch (error) { console.warn(`[announcement] ${chatId}:`, error); }
+  } catch (error) {
+    console.warn(`[announcement] ${chatId}:`, error);
+    // 公告 API 失败可能是群已失效（机器人被移出 / 群解散）——判定命中则清理该群（无权限等群级错误不匹配特征，不误伤）；
+    // 清理失败隔离记录，原始错误已由上方日志保留
+    try {
+      await handleChatGone(ctx, chatId, error);
+    } catch (cleanupError) {
+      console.warn(`[chat lifecycle] ${chatId}: 公告清理失败`, cleanupError);
+    }
+  }
 }
 
 async function readSessionMetadata(file: string): Promise<{ cwd: string; provider?: string; model?: string; thinkingLevel?: string }> {
