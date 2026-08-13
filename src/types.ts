@@ -20,6 +20,8 @@ export interface ChatBinding {
   activeSessionFile?: string;
   /** 话题 → 独立会话（懒初始化：话题内首次 @bot 时新建并绑定；不参与电脑端同步、不触发公告） */
   threadSessions?: Record<string, ThreadSessionBinding>;
+  /** AI 智能执行专用会话（懒创建：每群固定一个，翻译任务独立于主会话，不参与电脑端同步） */
+  aiCommandSessionFile?: string;
   /** 飞书来源 entry id（防回环）。即时标记：飞书 run 结束时记录本轮 ids，同步消费（进度推进）后立即清理，仅极端情况保留最近 1000 条 */
   feishuOriginEntryIds?: string[];
   sessionSync?: SessionSyncState;
@@ -92,6 +94,10 @@ export type AgentRun = {
   originEntryIds?: string[];
   stopRequested: boolean;
   latestOutput: string;
+  /** 卡片展示用 prompt（如 AI 智能执行显示用户输入而非完整提示词）；默认 = prompt */
+  displayPrompt?: string;
+  /** 执行成功回调（AI 智能执行：解析翻译结果并转交命令执行）；失败/停止不调用 */
+  onResult?: (answer: string) => void;
 };
 
 /** 挂起的消息上下文：用户发消息但未选 session 时暂存，选中/新建后自动续跑；消费即删（一次性），promptAt 防陈旧请求被历史卡误触发 */

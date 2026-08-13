@@ -10,6 +10,7 @@ import { bgTaskListCard, bindProjectFormCard, commandFinalCard, commandFormCard,
 import { commandOutputMarkdown, defaultProjectName, resolveWorkspacePath } from '../utils/format.js';
 import { parseSyncCount, syncComputerSessions, workspaceForChat } from '../sync/sync-service.js';
 import { startShellCommand } from '../commands/shell.js';
+import { runAiCommand } from '../agent/ai-command.js';
 import { updateAnnouncement } from '../announcement.js';
 import { runPrompt, useNewSession } from '../agent/prompt.js';
 import { createProject } from './projects.js';
@@ -62,7 +63,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   }
   if (cmd === 'command.form') {
     if (!ctx.state.get(event.chatId)) return toast('error', '该群尚未绑定项目。');
-    await send({ card: commandFormCard(workspaceForChat(ctx, event.chatId)) });
+    await send({ card: commandFormCard(workspaceForChat(ctx, event.chatId), process.platform === 'win32') });
     return toast('success', '已打开命令执行表单。');
   }
   if (cmd === 'command.submit') {
@@ -70,11 +71,21 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     if (!binding) return toast('error', '该群尚未绑定项目。');
     const form = cardFormValue(event);
     const command = form.command;
-    if (!command) return toast('error', '请填写命令。');
+    const aiCommand = form.aiCommand?.trim();
+    if (!command && !aiCommand) return toast('error', '请填写命令或 AI 智能执行内容。');
     const isBackground = cardFormFlag(event, 'isBackground');
     // 常驻任务模式忽略超时：跳过格式校验（“忽略超时秒数”语义）
     const timeoutSeconds = isBackground ? undefined : parseCommandTimeout(form.timeoutSeconds);
     if (timeoutSeconds === null) return toast('error', '超时必须是 1 到 86400 之间的整数秒。');
+    if (aiCommand) {
+      // AI 智能执行优先于命令框（都填时走 AI）；回复到触发表单卡（保持话题窗口）
+      const tid = await resolveThread();
+      void runAiCommand(ctx, event.chatId, aiCommand, { timeoutSeconds, background: isBackground, replyTo: tid ? event.messageId : undefined, threadId: tid }).catch((error) => {
+        console.error('[ai command]', error);
+        void send({ markdown: `AI 智能执行启动失败：${error instanceof Error ? error.message : String(error)}` }).catch((noticeError) => console.warn('[ai command fail notice]', noticeError));
+      });
+      return toast('success', '已提交 AI 智能执行。');
+    }
     const taskId = randomUUID();
     // 话题上下文：命令卡回复到触发表单卡（保持在话题窗口内）
     void startShellCommand(ctx, event.chatId, workspaceForChat(ctx, event.chatId), command, taskId, isBackground ? undefined : timeoutSeconds, isBackground, (await resolveThread()) ? event.messageId : undefined).catch((error) => {

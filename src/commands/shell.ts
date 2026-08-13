@@ -9,15 +9,18 @@ import { sendChat } from '../lark/chat-lifecycle.js';
 
 /**
  * 平台感知的 shell 解析（纯函数，便于独立验证）：
- * - Windows：固定 cmd.exe（/d 禁 AutoRun、/s 剥离首尾引号、/c 执行命令），减少回退成本；
+ * - Windows：固定 cmd.exe（/d 禁 AutoRun、/s 剥离首尾引号、/c 执行命令），减少回退成本；命令前自动前置
+ *   `chcp 65001 >nul &&` 把代码页切为 UTF-8，使 cmd 内建命令 / 错误消息 / 多数现代工具（git、node 等）的
+ *   输出与 Node 的 UTF-8 解码一致（极少按 GBK 硬编码输出的老程序仍会乱码，属已知局限）；
  * - macOS / Linux 等 POSIX：沿用 $SHELL（如 /bin/zsh），缺省 /bin/sh（-lc 登录 shell 执行）。
- * 注：Windows 回退 cmd.exe 后 POSIX 命令（ls 等）不可用，需使用 cmd 语法（dir 等）；输出编码以 cmd 默认代码页为准。
+ * 注：Windows 回退 cmd.exe 后 POSIX 命令（ls 等）不可用，需使用 cmd 语法（dir 等；跨盘 cd 需 /d）。
+ * 如变更 Windows shell 策略（如改用 PowerShell），需同步更新 commandFormCard 的 Windows 提示文案（src/cards.ts）。
  */
-export function resolveShell(): { shell: string; args: string[] } {
+export function resolveShell(): { shell: string; args: string[]; commandPrefix: string } {
   if (process.platform === 'win32') {
-    return { shell: 'cmd.exe', args: ['/d', '/s', '/c'] };
+    return { shell: 'cmd.exe', args: ['/d', '/s', '/c'], commandPrefix: 'chcp 65001 >nul && ' };
   }
-  return { shell: process.env.SHELL?.trim() || '/bin/sh', args: ['-lc'] };
+  return { shell: process.env.SHELL?.trim() || '/bin/sh', args: ['-lc'], commandPrefix: '' };
 }
 
 export async function startShellCommand(
@@ -44,10 +47,10 @@ export async function runShellCommand(
   timeoutSeconds?: number,
   background = false,
 ): Promise<void> {
-  const { shell, args } = resolveShell();
+  const { shell, args, commandPrefix } = resolveShell();
   let child: ChildProcess;
   try {
-    child = spawn(shell, [...args, command], {
+    child = spawn(shell, [...args, `${commandPrefix}${command}`], {
       cwd,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],

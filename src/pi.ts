@@ -205,6 +205,20 @@ export class PiSessions {
     }));
   }
 
+  /** 当前生效模型：读 session JSONL 最后一条 model_change entry（无则 undefined） */
+  async modelOf(cwd: string, sessionFile: string): Promise<PiModelOption | undefined> {
+    return this.withSessionLock(sessionFile, () => this.usingSession(cwd, sessionFile, (session) => {
+      const entries = session.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i] as { type?: string; provider?: string; modelId?: string };
+        if (entry.type === 'model_change' && typeof entry.provider === 'string' && typeof entry.modelId === 'string') {
+          return { provider: entry.provider, id: entry.modelId, name: entry.modelId };
+        }
+      }
+      return undefined;
+    }));
+  }
+
   async thinkingLevels(cwd: string, sessionFile: string): Promise<PiThinkingLevel[]> {
     return this.usingSession(cwd, sessionFile, (session) => session.getAvailableThinkingLevels());
   }

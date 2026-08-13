@@ -30,7 +30,8 @@ export function createCardUpdater(ctx: AppContext, chatId: string, messageId: st
   const startUpdate = (): Promise<void> => {
     if (updatePromise) return updatePromise;
     updatePromise = (async () => {
-      while (!finished && pendingCard) {
+      // 不依赖 finished：finish 后仍把已排队的 update 发完（execute 补帧的完整预览不丢失），最终卡紧随其后发送
+      while (pendingCard) {
         const card = pendingCard;
         pendingCard = undefined;
         await updateCardWithRetry(ctx, chatId, messageId, card, label);
@@ -48,13 +49,13 @@ export function createCardUpdater(ctx: AppContext, chatId: string, messageId: st
   };
 
   /**
-   * 最终更新：置 finished 后该卡必然发送。
+   * 最终更新：置 finished 后该卡必然发送，且等已排队的 update 全部发送完成后发送（顺序：补帧预览 → 最终卡）。
    * 契约：finish 可被多次调用（如停止流程先 finish 过渡卡「正在停止」，abort 完成后 execute 再 finish 最终卡），
    * 后续 finish 会覆盖先前的卡片——属预期行为（最终态覆盖过渡态），依赖 finishTail 链保证顺序。
+   * 注意：不清理 pendingCard——挂起的 update（补帧）必须发送，否则运行中卡停留在较早「中途帧」被最终卡覆盖。
    */
   const finish = (card: object): Promise<void> => {
     finished = true;
-    pendingCard = undefined;
     const previous = updatePromise ?? Promise.resolve();
     const next = finishTail
       .catch((error) => console.warn(`[${label}] previous finish failed`, error))

@@ -55,7 +55,7 @@
 - 排队：发「Agent 等待处理」卡（含停止按钮）；排队中停止 → 取消（"已在开始前取消"）。
 - 执行中：原位更新「Agent 正在处理」卡，以 **750ms 节流**刷新回复预览（事件驱动，无新输出不刷新），含停止按钮。
 - 停止：立即发过渡卡「正在停止 Agent」且**携带当前最新输出**（内容不丢失）；`pi.abort()` 完成后最终卡「Agent 已停止」= 完整输出 + 状态栏。过渡卡移除停止按钮，避免重复 abort。
-- 完成 / 失败：最终卡无按钮，标题含耗时（如"Agent 处理完成 - 耗时：23 秒"）；失败 = 已有输出 + 错误信息 + 状态栏。
+- 完成 / 失败：最终卡无按钮，标题含耗时（如"Agent 处理完成 - 耗时：23 秒"）；**最终回复只追加**——prompt 返回后先补渲染最新流式帧（节流可能未触发，避免「中途帧 → 最终卡」跳变），最终卡保留中途上下文（`displayPrompt` 请求行，AI 智能执行场景）+ 完整流式累积（含中途已显示内容，不一致时拼接保留），仅追加完成状态；失败 = 已有输出 + 错误信息 + 状态栏。
 - 边界：停止后预览节流停止（`state !== running`）；多群并行、每群串行（同一 session 文件被多群共享时，prompt/compact/rename 等写操作跨群同样串行，按 sessionFile 锁）；服务关闭时统一停止并通知（见 2.8）。
 
 **回复引用上下文（含引用附件）**
@@ -128,18 +128,26 @@
 
 **表单（`command.form`）**
 
-- 命令（必填）；超时秒数（可选，1–86,400 整数，输入框**默认值 10**，可修改或清空——清空即不自动停止）。
+- 「命令」与「AI 智能执行」二选一（可都填：**AI 智能执行优先**，都空则报错）；超时秒数（可选，1–86,400 整数，输入框**默认值 10**，可修改或清空——清空即不自动停止）。
 - 「常驻任务」勾选器（`checker` 组件，`name: 'isBackground'`）：JSON 2.0 支持；约束飞书客户端 V7.9+（低版本显示占位）。
 - 提交解析：`cardFormValue` 需支持 boolean 值（当前只提取 string，需扩展）。
 
 **普通模式**
 
-- `spawn(shell, [...args, cmd])`，在群绑定工作路径执行；shell 平台感知（`resolveShell`）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；输出编码以 cmd 默认代码页为准），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；spawn 带 `windowsHide: true`。
+- `spawn(shell, [...args, commandPrefix + cmd])`，在群绑定工作路径执行；shell 平台感知（`resolveShell`）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；命令前自动前置 `chcp 65001 >nul && ` 把代码页切为 UTF-8，cmd 内建命令 / 错误消息 / 多数现代工具输出与 Node 的 UTF-8 解码一致，极少按 GBK 硬编码输出的老程序仍会乱码），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；spawn 带 `windowsHide: true`。
 - 执行中卡片**流式节流更新**：stdout/stderr `data` 事件触发 750ms 节流，**stdout/stderr 原样**原位刷新卡片；**无「查看输出」按钮**，仅「停止」。
 - 结束：最终卡 = 已流式显示的累计输出 + **追加状态消息**（`\n\n命令执行完成。` / `命令执行失败（退出码 N，信号 S）。` / `命令超时（N 秒）并已停止。` / `命令已手动停止。`），标题保留状态文本；输出统一使用可容纳内嵌反引号的动态长度 code fence。
 - 停止：进程组 SIGTERM → 5s 未退 SIGKILL（Windows 退化为单进程 kill）；点击停止后先追加「正在停止命令」。
 - 超时：到点先更新最终卡再终止进程组。
 - 边界：输出内存截断 30 KB；卡片 6000 字符限制（头 1/3 + 尾部 + 截断标记）；spawn 失败提示「命令启动失败」；节流 + `createCardUpdater` 串行化防高频写卡。
+
+**AI 智能执行（`command.form` 表单内）**
+
+- 「AI 智能执行」输入框：大白话或命令，AI 翻译为当前平台真实可执行的命令后执行；**优先于「命令」框**（都填时走 AI）；「常驻任务」勾选同样生效（翻译后后台执行）。
+- 流程（`runAiCommand`，`src/agent/ai-command.ts`）：每群固定「智能执行」session（懒创建持久化 `binding.aiCommandSessionFile`；首次创建时同步主 session 当前模型；独立于主会话，**不参与电脑端同步、不触发公告**）→ 翻译任务进 AgentRunManager 每群队列（排队/生成中卡复用 agent 卡链，停止按钮 `agent.stop` 复用，inFlight 防回环标记复用）→ 单轮 prompt → 解析翻译结果 → 转交 `startShellCommand`（超时 / 常驻 / 流式卡 / chcp 编码修复全复用）。
+- 提示词（`buildAiCommandPrompt` 纯函数）：注入平台（Windows cmd / POSIX）、shell（**派生自 `resolveShell`**，与真实执行一致）、cwd；要求区分环境、全角符号转半角（～ → ~）、~ 用户目录、输入已是命令时保持原样仅修格式错误、危险操作拒绝（command 空 + reason 说明）；输出严格 JSON `{"command", "reason"}`。
+- 解析（`parseAiCommandOutput` 纯函数）：剥 code fence → JSON.parse → command 非空即执行；command 空 = 拒绝（发消息展示 reason，不执行）；非 JSON / 缺 command 字段视为格式无效，展示原因且不执行。
+- 失败 / 停止不转交执行；翻译成功才执行，无自动纠错（第一版）；「AI 智能执行」session 出现在切换会话列表（命名「智能执行」，可辨识）。
 
 **常驻任务（后台任务）模式**
 
@@ -262,7 +270,7 @@ lark-agent-os（单进程 + 实例锁）
 
 - 飞书应用：启用机器人消息事件（WebSocket）；`im:chat`（建群）；群公告 Docx API 需在群内且具公告编辑权限（群主 / 管理员限定群需额外权限）。
 - pi SDK：读取本机 `~/.pi/agent` 的 provider / model / auth 配置。
-- 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`、POSIX `$SHELL`（默认 `/bin/sh`）。
+- 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`（前置 `chcp 65001` 切 UTF-8 代码页）、POSIX `$SHELL`（默认 `/bin/sh`）。
 
 ---
 

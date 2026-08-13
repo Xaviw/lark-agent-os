@@ -40,6 +40,7 @@
 | `src/lark-api.ts` | tenant token 缓存 + 群公告 Docx API |
 | `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡）；`cancelChat(chatId)`（群失效清理：复用 stop 语义） |
 | `src/agent/prompt.ts` | `runPrompt` / `promptWithReplyContext` / `useNewSession`（引用消息上下文、飞书来源标记） |
+| `src/agent/ai-command.ts` | AI 智能执行：提示词构造 + 翻译结果解析（纯函数）+ 编排（懒创建独立 session → agent 队列翻译 → 转交命令执行） |
 | `src/commands/shell.ts` | 命令执行（平台感知 shell：Windows `cmd.exe /d /s /c`、POSIX `$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`） |
 | `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `extractText`（纯函数） |
 | `src/sync/select-turns.ts` | `selectSyncTurns`：方案 B 轮次选择（纯函数） |
@@ -59,9 +60,10 @@
 
 - **卡片交互**：全部为 JSON 2.0（`schema: '2.0'`）。按钮 `behaviors: [{ type: 'callback', value: { cmd, ... } }]`；表单用 `form` 容器 + `input` / `checker`（V7.9+）。`cardFormValue` 只取 string 值并 trim；布尔字段（checker）用 `cardFormFlag` 单独读取。**卡片操作不再使用 nonce**：历史卡片（含二级选择器/表单）可重复使用，唯一限制是飞书卡片 14/30 天交互有效期（超期客户端拦截）与平台连点限流（~10s，客户端提示「操作太频繁」）；`pending` 槽只承载「挂起消息上下文」（`showSessionSetup` 暂存，选中/新建 session 后经 `takePendingPrompt`（`utils/pending-prompt.ts`）一次性消费续跑，超 `PENDING_PROMPT_MAX_MS`=30 分钟不续跑并 toast 提示「之前挂起的消息已超过 30 分钟未处理」；消费即删防历史卡重复触发续跑）；历史卡可用性校验：`session.use` 按 `sessions.find` 校验，`session.sync.submit` / `model.select` / `thinkingLevel.select` / `session.rename.submit` 前置 `sessionFileExists`（stat）校验（toast「该 Session 已不存在，请重新选择 Session」）；`model.select` 等失败路径由 SDK 校验 + main.ts 全局兜底 toast 覆盖。
   - **卡片按钮可重复点击**：`@larksuite/channel` safety 层按 `card:{messageId}:{openId}:{actionId}` 去重，默认 TTL 12h（同一卡片同一按钮只放行一次，实测确认）；已把 `safety.dedup.ttl` 缩短为 3s。快速连点（实测窗口约 10s）由飞书平台限流拦截——客户端提示「操作太频繁」，事件不发出（非服务端文案，无需处理）；防重推由应用层承担：`handleCardAction` 用事件唯一 ID `event_id` 去重（30 分钟窗口，`utils/seen.ts` 的 `createSeenSet`，raw 事件含 `event_id`；长连接无 X-Refresh-Token header）；`handleMessage` 用 messageId 去重（1 小时窗口，补偿 seenCache 缩短后断线重连/平台重推的空隙）。
-- **卡片更新**：`createCardUpdater`（pending + 单飞队列串行化 + 失败重试一次）；**事件驱动节流**（750ms，非轮询）——agent 预览与命令输出共用该模式（`createThrottledUpdate`）。内容限制：卡片 6000 字符（`limitedMarkdown` 头 1/3 + 尾），命令输出内存 30KB。
+- **卡片更新**：`createCardUpdater`（pending + 单飞队列串行化 + 失败重试一次）；`finish` 不丢弃已排队的 update（补帧预览先发完再发最终卡，避免「中途帧 → 最终卡」内容跳变），多次 finish 由 finishTail 链保序（过渡态 → 最终态）；**事件驱动节流**（750ms，非轮询）——agent 预览与命令输出共用该模式（`createThrottledUpdate`）。内容限制：卡片 6000 字符（`limitedMarkdown` 头 1/3 + 尾），命令输出内存 30KB。
 - **Agent 队列状态机**：每群串行 `queued → running → succeeded / failed / cancelled`（含 `stopping`）；停止过渡卡带 `run.latestOutput`；`inFlightFeishuRun.beforeEntryIds` 在 sessionFile 锁内、SDK prompt 前采集并持久化，结束后按精确新增 ids 即时标记飞书来源。
-- **命令执行**：shell 平台感知（`resolveShell` 纯函数）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；输出编码以 cmd 默认代码页为准），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；于群绑定 cwd 执行；spawn 带 `windowsHide: true`；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新，输出中的反引号由动态长度 code fence 包裹；Agent 最终回答保留 Markdown 原文；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
+- **命令执行**：shell 平台感知（`resolveShell` 纯函数）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；命令前自动前置 `chcp 65001 >nul && ` 切 UTF-8 代码页，使 cmd 内建命令 / 错误消息 / 多数现代工具输出与 Node 的 UTF-8 解码一致），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；于群绑定 cwd 执行；spawn 带 `windowsHide: true`；进程组 SIGTERM → 5s SIGKILL（`terminateProcessGroup`，Windows 退化为单进程 kill）；普通模式输出流式节流更新，输出中的反引号由动态长度 code fence 包裹；Agent 最终回答保留 Markdown 原文；「常驻任务」勾选后注册到 `backgroundTasks`（不进入 `commandTasks`），`shutdown` 时全部终止。后台任务不持久化。
+- **AI 智能执行**：命令表单新增「AI 智能执行」输入框（**优先于命令框**，都填时走 AI）——`runAiCommand`（`src/agent/ai-command.ts`）：每群固定「智能执行」session（懒创建持久化 `binding.aiCommandSessionFile`，首次创建时同步主 session 当前模型；独立于主会话、不参与电脑端同步、不触发公告）；翻译任务走 AgentRunManager 每群队列（与主对话互斥、复用停止按钮与 inFlight 防回环）；提示词（`buildAiCommandPrompt` 纯函数）注入平台/shell/cwd，约束模型区分 Windows cmd 与 POSIX 语法、全角转半角（～→~）、危险操作拒绝（command 空 + reason）；解析（`parseAiCommandOutput` 纯函数）仅接受 JSON（可剥 code fence），非 JSON 或缺 command 字段视为无效翻译并拒绝执行；翻译成功才转交 `startShellCommand`（复用超时/常驻/编码修复），拒绝或失败不执行（无自动纠错）。
 - **会话同步（方向不对称）**：
   - 电脑端 → 飞书：`SessionSyncWatcher`（fs.watch + 60s 轮询 + 750ms 防抖 + 双 stat 校验 + 指数退避 ≤3 次）单向推送；同一 `activeSessionFile` 被多个群绑定时，任一群的 Agent / 飞书轮次都会让所有绑定群暂缓同步，完成后统一重新调度；
   - 飞书 → 电脑端：**无推送**，pi SDK 直接写共享 session JSONL，电脑端 resume 可见；
@@ -72,7 +74,7 @@
 - **群公告**：Docx API；触发时机 = 切换/新建/恢复/重命名 session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）；首条创建后 pin；私聊不维护；**话题内操作不触发**。
 - **群生命周期（`src/lark/chat-lifecycle.ts`）**：SDK 无 `bot.removed` / `disbanded` 事件订阅，以**外向发送失败信号**驱动清理——所有 `ctx.lark.send` 统一走 `sendChat` 包装（无 replyTo 时 `target_revoked` 视为群不可达；带 replyTo 仅匹配错误文本特征，防回复目标消息被删误伤），卡片更新（`updateCardWithRetry`）与群公告 API 失败同样判定（`isChatUnreachable` 纯函数：`10030` / `232009` / 已解散 / 机器人不在 / 群不存在）；命中即 `cleanupChat`（幂等）：取消该群 agent run（`cancelChat` 复用 stop 语义）→ 终止前台命令 → 清 pending（含话题 key）→ `watcher.forget` + reconcile → `state.delete`。后台任务不按群索引（`BackgroundTask` 无 chatId），不清理。
 - **加群欢迎（botAdded）**：main.ts 接线 `im.chat.member.bot.added_v1` → `handleBotAdded`：无 binding 时自动绑定默认工作区（后续可「修改绑定」）并发欢迎卡（`botWelcomeCard`，按钮 cmd `help` → `handleCardAction` 的 `help` 分支复用 `showHelp`）；binding 已存在仅补发欢迎卡。
-- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / threadSessions（话题 threadId → { sessionFile, updatedAt }）/ updatedAt`。
+- **state.json**（默认 `.state/state.json`）：每群 `cwd / chatType / activeSessionFile / feishuOriginEntryIds / sessionSync / inFlightFeishuRun / threadSessions（话题 threadId → { sessionFile, updatedAt }）/ aiCommandSessionFile（AI 智能执行专用会话，懒创建）/ updatedAt`。
 - **单实例锁**：`.state/instance.lock` 写 PID；持有进程存活则拒绝启动，ESRCH 自动清理重试；启动获取锁时会清理同目录中已确认所属进程退出的候选 `.tmp` 文件。
 
 ## 命名与代码约定
@@ -125,4 +127,4 @@
 - **重启警告（重要）**：不要在由同一个 `lark-agent-os` 进程处理的飞书 Agent 请求中执行 `kill -TERM <lark-agent-os-pid>`——服务进入关闭流程后会中止所有正在执行的 Agent run（含当前请求），导致 `Error: This operation was aborted`。应在当前 Agent 请求完成后，从**外部终端**重启服务；如必须以编程方式触发重启，应先启动一个脱离旧服务进程组的 supervisor，再停止服务；supervisor 等待旧 PID 退出后再启动新实例。
 - 排查：关键路径日志前缀 `[agent run]` / `[command]` / `[session sync]` / `[announcement]` / `[session watch]` / `[compact]` / `[cardAction]`；状态看 `.state/state.json`；锁文件残留（进程已死）会自动清理。
 - shutdown 流程：终止 commandTasks + backgroundTasks → 关 watcher → 停止 agent（1.5s 内发「服务正在关闭」卡）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
-- 已知边界：Windows 下进程组终止退化为单进程 kill；Windows 固定 `cmd.exe` 执行（POSIX 命令如 `ls` 不可用，需 cmd 语法；输出编码以 cmd 默认代码页为准；命令内嵌引号经 node spawn Windows 转义后可能原样输出含 `\` 的引号）；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志。
+- 已知边界：Windows 下进程组终止退化为单进程 kill；Windows 固定 `cmd.exe` 执行（POSIX 命令如 `ls` 不可用，需 cmd 语法；已前置 `chcp 65001` 切 UTF-8 代码页，但按 GBK 硬编码输出的老程序仍会乱码；命令内嵌引号经 node spawn Windows 转义后可能原样输出含 `\` 的引号）；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志。

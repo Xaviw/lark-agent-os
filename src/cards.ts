@@ -171,11 +171,16 @@ export function botWelcomeCard(cwd: string): object {
   ] } };
 }
 
-export function commandFormCard(cwd: string): object {
+export function commandFormCard(cwd: string, isWindows: boolean): object {
+  // Windows 提示：cmd 语法与跨盘 cd 规则（避开 ls 不可用 / 路径写法等常见问题）；平台由调用方注入以保持纯函数可测
+  const platformHint = isWindows
+    ? '\n\n当前为 Windows 环境，请使用 cmd 语法，如 `cd /d d:\\company && dir`（跨盘需 `/d`；`ls` 请用 `dir`；`/d:/` 风格仅在 Git Bash 内有效）。'
+    : '';
   return { schema: '2.0', config: { summary: { content: '执行命令' } }, body: { elements: [
-    { tag: 'markdown', content: `**执行命令**\n\n工作路径：\`${cwd}\`` },
+    { tag: 'markdown', content: `**执行命令**\n\n工作路径：\`${cwd}\`\n\n**AI 智能执行**：输入大白话或命令，AI 翻译为当前平台命令后执行（优先于下方命令框）。${platformHint}` },
     { tag: 'form', name: 'command_form', elements: [
-      { tag: 'input', name: 'command', label: { tag: 'plain_text', content: '命令' }, placeholder: { tag: 'plain_text', content: 'pnpm test' }, required: true },
+      { tag: 'input', name: 'aiCommand', label: { tag: 'plain_text', content: 'AI 智能执行（可选）' }, placeholder: { tag: 'plain_text', content: '例如：查看当前目录剩余空间' } },
+      { tag: 'input', name: 'command', label: { tag: 'plain_text', content: '命令' }, placeholder: { tag: 'plain_text', content: 'pnpm test' } },
       { tag: 'input', name: 'timeoutSeconds', label: { tag: 'plain_text', content: '超时（秒，可选）' }, placeholder: { tag: 'plain_text', content: '默认 10 秒，可修改或清空（清空则不自动停止）' }, default_value: '10' },
       { tag: 'checker', name: 'isBackground', text: { tag: 'plain_text', content: '常驻任务（忽略超时，后台持续运行）' }, checked: false },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '执行' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'command.submit' } }] },

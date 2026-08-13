@@ -10,6 +10,10 @@ export interface SubmitRunOptions {
   sessionFile: string;
   /** 提交时的 prompt 骨架（引用附件段可能由 prepare 补齐） */
   prompt: string;
+  /** 卡片展示用 prompt（如 AI 智能执行显示用户输入而非完整提示词）；默认 = prompt */
+  displayPrompt?: string;
+  /** 执行成功回调（AI 智能执行：解析翻译结果并转交命令执行）；失败/停止不调用 */
+  onResult?: (answer: string) => void;
   id?: string;
   /** 后台附件准备（下载被引用资源 → 最终 prompt）；提交时立即启动，execute 前 await */
   prepare?: () => Promise<PreparedPrompt>;
@@ -57,12 +61,12 @@ export class AgentRunManager {
 
   async submit(message: NormalizedMessage, opts: SubmitRunOptions): Promise<void> {
     const id = opts.id ?? randomUUID();
-    const sent = await sendChat(this.ctx, message.chatId, { card: agentQueuedCard(id, opts.prompt) }, { replyTo: message.messageId });
+    const sent = await sendChat(this.ctx, message.chatId, { card: agentQueuedCard(id, opts.displayPrompt ?? opts.prompt) }, { replyTo: message.messageId || undefined });
     // 记录状态卡所在话题上下文：话题窗口内的 agent 卡后续「停止」操作直接命中缓存，免反查
     rememberCardThread(sent.messageId, message.threadId);
     const run: AgentRun = {
       id, chatId: message.chatId, cwd: opts.cwd, sessionFile: opts.sessionFile, prompt: opts.prompt, messageId: sent.messageId, startedAt: Date.now(), state: 'queued',
-      updater: createCardUpdater(this.ctx, message.chatId, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '',
+      updater: createCardUpdater(this.ctx, message.chatId, sent.messageId, 'agent status'), stopRequested: false, latestOutput: '', displayPrompt: opts.displayPrompt, onResult: opts.onResult,
       // 后台附件准备：提交时立即启动（与排队并行），execute 前 await；内部异常兑底为失败结果
       prepare: opts.prepare
         ? opts.prepare().catch((error) => ({ prompt: opts.prompt, error: `附件准备失败：${error instanceof Error ? error.message : String(error)}` }))
@@ -162,14 +166,14 @@ export class AgentRunManager {
       run.images = prepared.images;
       run.prepare = undefined;
     }
-    void run.updater.update(agentRunningCard(run.id, run.prompt)).catch((error) => console.warn('[agent start status]', error));
+    void run.updater.update(agentRunningCard(run.id, run.displayPrompt ?? run.prompt)).catch((error) => console.warn('[agent start status]', error));
     let previewTimer: NodeJS.Timeout | undefined;
     let lastPreviewAt = 0;
     const updatePreview = (): void => {
       previewTimer = undefined;
       if (run.state !== 'running') return;
       lastPreviewAt = Date.now();
-      void run.updater.update(agentRunningCard(run.id, run.prompt, run.latestOutput)).catch((error) => console.warn('[agent preview status]', error));
+      void run.updater.update(agentRunningCard(run.id, run.displayPrompt ?? run.prompt, run.latestOutput)).catch((error) => console.warn('[agent preview status]', error));
     };
     const isStopping = (): boolean => run.stopRequested;
     try {
@@ -197,11 +201,28 @@ export class AgentRunManager {
         onEntryIds: (entryIds) => { run.originEntryIds = entryIds; },
       });
       if (previewTimer) clearTimeout(previewTimer);
+      // 补渲染最新流式帧：prompt 返回前节流可能未触发，卡片停留在较早「中途帧」→ 先同步到完整输出，
+      // 避免最终卡替换时的内容跳变（已显示内容只增不减，与普通对话流式体验一致）
+      if (run.latestOutput && !isStopping()) {
+        await run.updater.update(agentRunningCard(run.id, run.displayPrompt ?? run.prompt, run.latestOutput)).catch((error) => console.warn('[agent final preview]', error));
+      }
       run.state = isStopping() ? 'cancelled' : 'succeeded';
+      // 最终回复只追加：保留中途上下文（请求行，AI 智能执行场景）与完整流式累积（天然包含中途已显示内容）；
+      // 防御：与最新预览不一致时拼接保留，绝不丢弃已显示内容
+      const latest = run.latestOutput?.trim();
+      const answer = latest && !result.answer.startsWith(latest) ? `${latest}\n\n${result.answer}` : result.answer;
+      const finalContent = run.displayPrompt ? `${run.displayPrompt}\n\n${answer}` : answer;
       const card = run.state === 'cancelled'
         ? agentFinalCard('Agent 已停止', run.latestOutput || '已停止处理。', result.status, elapsedSince(run.startedAt))
-        : agentFinalCard('Agent 处理完成', result.answer, result.status, elapsedSince(run.startedAt));
+        : agentFinalCard('Agent 处理完成', finalContent, result.status, elapsedSince(run.startedAt));
       await run.updater.finish(card).catch((error) => console.warn('[agent final status]', error));
+      // 成功后才转交后续流程（AI 智能执行：解析翻译结果 → 命令执行）；失败/停止不调用
+      // try 保护：回调异常不得把已完成 run 误标 failed 或覆盖最终卡
+      try {
+        run.onResult?.(result.answer);
+      } catch (error) {
+        console.warn('[agent onResult]', error);
+      }
     } catch (error) {
       run.state = isStopping() ? 'cancelled' : 'failed';
       const content = agentFailureContent(run.latestOutput, error, run.stopRequested);
