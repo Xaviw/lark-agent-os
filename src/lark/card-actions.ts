@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { CardActionEvent, CardActionResponse, SendInput } from '@larksuite/channel';
+import { stat } from 'node:fs/promises';
+import type { CardActionEvent, CardActionResponse, NormalizedMessage, SendInput } from '@larksuite/channel';
 import type { AppContext } from '../app-context.js';
-import { COMMAND_CARD_OUTPUT_LIMIT } from '../config.js';
+import { CARD_EVENT_SEEN_TTL_MS, COMMAND_CARD_OUTPUT_LIMIT, PENDING_PROMPT_MAX_MS } from '../config.js';
+import { createSeenSet } from '../utils/seen.js';
+import { takePendingPrompt } from '../utils/pending-prompt.js';
 import type { PiThinkingLevel } from '../pi.js';
 import { bgTaskListCard, bindProjectFormCard, commandFinalCard, commandFormCard, createProjectFormCard, createSessionFormCard, modelPickerCard, renameSessionFormCard, sessionDisplayName, sessionPickerCard, syncFormCard, thinkingLevelPickerCard } from '../cards.js';
 import { commandOutputMarkdown, defaultProjectName, resolveWorkspacePath } from '../utils/format.js';
@@ -20,8 +23,20 @@ const TOPIC_BLOCKED_CMDS = new Set([
   'project.bind.form', 'project.bind.submit', 'session.sync.form', 'session.sync.submit',
 ]);
 
+/** 卡片事件防重推（event_id 去重，内存态，重启即清） */
+const seenCardEvents = createSeenSet(CARD_EVENT_SEEN_TTL_MS);
+
 /** 卡片动作分发：全部 cmd 分支 + 表单解析工具 */
 export async function handleCardAction(ctx: AppContext, event: CardActionEvent): Promise<CardActionResponse> {
+  // 防重推：长连接事件无 X-Refresh-Token header，用事件唯一 ID（event_id）去重——
+  // 平台重推携带相同 event_id（SDK 12h dedup 缩短为秒级后由本层兜底 30 分钟窗口）；合法再次点击是新 event_id，不受影响。
+  const raw = (event.raw ?? {}) as Record<string, unknown>;
+  const eventId = typeof raw.event_id === 'string' ? raw.event_id : undefined;
+  if (eventId && seenCardEvents.has(eventId)) {
+    console.debug(`[cardAction] 拦截重推事件 ${eventId}`);
+    return toast('warning', '该操作已处理，请查看最新消息。');
+  }
+  if (eventId) seenCardEvents.add(eventId);
   const value = event.action.value as Record<string, unknown> | undefined;
   if (!value || typeof value !== 'object') return toast('warning', '无效的卡片操作。');
   const cmd = value.cmd;
@@ -62,9 +77,11 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     if (timeoutSeconds === null) return toast('error', '超时必须是 1 到 86400 之间的整数秒。');
     const taskId = randomUUID();
     // 话题上下文：命令卡回复到触发表单卡（保持在话题窗口内）
-    void startShellCommand(ctx, event.chatId, workspaceForChat(ctx, event.chatId), command, taskId, isBackground ? undefined : timeoutSeconds, isBackground, (await resolveThread()) ? event.messageId : undefined).catch((error) =>
-      console.error('[command]', error),
-    );
+    void startShellCommand(ctx, event.chatId, workspaceForChat(ctx, event.chatId), command, taskId, isBackground ? undefined : timeoutSeconds, isBackground, (await resolveThread()) ? event.messageId : undefined).catch((error) => {
+      console.error('[command]', error);
+      // 启动前失败（starting 卡发送失败等）用户无感知，补发失败消息（spawn 失败本身已有失败卡）
+      void send({ markdown: `命令启动失败：${error instanceof Error ? error.message : String(error)}` }).catch((noticeError) => console.warn('[command fail notice]', noticeError));
+    });
     return toast('success', isBackground ? '后台任务已启动。' : '命令已开始执行。');
   }
   if (cmd === 'agent.stop' && typeof value.taskId === 'string') {
@@ -153,34 +170,22 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   const tid = await resolveThread();
   const activeSessionFile = tid ? await ensureThreadSession(ctx, event.chatId, tid, cwd) : binding.activeSessionFile;
   const requireActiveSession = (): string | undefined => activeSessionFile;
-  // pending 按会话隔离：话题与主会话并发操作不互相置过期
-  const pendingKey = tid ? `${event.chatId}:${tid}` : event.chatId;
-  const createPending = (): string => {
-    const nonce = randomUUID();
-    ctx.pending.set(pendingKey, { nonce });
-    return nonce;
-  };
-  const current = ctx.pending.get(pendingKey);
-  if (typeof value.nonce === 'string' && current && value.nonce !== current.nonce) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
 
   if (cmd === 'session.new.form') {
-    const nonce = createPending();
-    await send({ card: createSessionFormCard(nonce, '新建 Session') });
+    await send({ card: createSessionFormCard('新建 Session') });
     return toast('success', '请填写 Session 名称。');
   }
   if (cmd === 'session.resume.form') {
     const sessions = await ctx.pi.list(cwd);
     if (sessions.length === 0) return toast('warning', '当前路径没有可恢复的 Session，请使用 new。');
-    const nonce = createPending();
-    await send({ card: sessionPickerCard(cwd, sessions, nonce) });
+    await send({ card: sessionPickerCard(cwd, sessions) });
     return toast('success', '请选择要恢复的 Session。');
   }
   if (cmd === 'model.form') {
     if (!requireActiveSession()) return toast('warning', '请先使用 new 或 resume 选择 Session。');
     const models = await ctx.pi.models();
     if (models.length === 0) return toast('error', '没有可用的 provider/model。');
-    const nonce = createPending();
-    await send({ card: modelPickerCard(models, nonce) });
+    await send({ card: modelPickerCard(models) });
     return toast('success', '请选择 provider/model。');
   }
   if (cmd === 'thinkingLevel.form') {
@@ -188,8 +193,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
     const thinkingLevels = await ctx.pi.thinkingLevels(cwd, sessionFile);
     if (thinkingLevels.length === 0) return toast('warning', '当前 model 不支持思考强度设置。');
-    const nonce = createPending();
-    await send({ card: thinkingLevelPickerCard(thinkingLevels, nonce) });
+    await send({ card: thinkingLevelPickerCard(thinkingLevels) });
     return toast('success', '请选择思考强度。');
   }
   if (cmd === 'session.sync.form') {
@@ -200,6 +204,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'session.sync.submit') {
     const sessionFile = requireActiveSession();
     if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
     const count = parseSyncCount(cardFormValue(event).count);
     if (count === null) return toast('error', '同步条数必须是正整数。');
     const result = await syncComputerSessions(ctx, event.chatId, 'manual', count);
@@ -211,8 +216,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   }
   if (cmd === 'session.rename.form') {
     if (!requireActiveSession()) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    const nonce = createPending();
-    await send({ card: renameSessionFormCard(nonce) });
+    await send({ card: renameSessionFormCard() });
     return toast('success', '请填写 Session 名称。');
   }
   if (cmd === 'session.compact') {
@@ -221,45 +225,43 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     void ctx.pi.compact(cwd, sessionFile).catch((error) => {
       console.error('[compact]', error);
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-      void send({ markdown: `Session 压缩失败：${reason}` });
+      void send({ markdown: `Session 压缩失败：${reason}` }).catch((noticeError) => console.warn('[compact fail notice]', noticeError));
     });
     return toast('success', '正在压缩 Session 上下文。');
   }
   if (cmd === 'model.select' && typeof value.provider === 'string' && typeof value.modelId === 'string') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile || !current) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
+    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
     const selected = await ctx.pi.setModel(cwd, sessionFile, value.provider, value.modelId);
-    ctx.pending.delete(pendingKey);
     if (!tid) void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已切换到 ${selected.provider}/${selected.name}。`);
   }
   if (cmd === 'thinkingLevel.select' && typeof value.thinkingLevel === 'string') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile || !current) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
+    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
     await ctx.pi.setThinkingLevel(cwd, sessionFile, value.thinkingLevel as PiThinkingLevel);
-    ctx.pending.delete(pendingKey);
     if (!tid) void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已设置思考强度：${value.thinkingLevel}。`);
   }
   if (cmd === 'session.rename.submit') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile || !current) return toast('warning', '该操作卡片已过期，请重新打开 /help。');
+    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
     const name = cardFormValue(event).name.replace(/[\r\n]+/g, ' ').trim();
     if (!name) return toast('error', '请填写 Session 名称。');
     await ctx.pi.rename(cwd, sessionFile, name);
-    ctx.pending.delete(pendingKey);
     if (!tid) void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已命名为 ${name}。`);
   }
   let selected: string;
   if (cmd === 'session.create.submit') {
-    if (!current) return toast('warning', '该新建表单已过期，请重新打开 /help。');
     const name = cardFormValue(event).name.replace(/[\r\n]+/g, ' ').trim();
     if (!name) return toast('error', '请填写 Session 名称。');
     await useNewSession(ctx, event.chatId, cwd, name);
     selected = name;
   } else if (cmd === 'session.use' && typeof value.sessionFile === 'string') {
-    if (!current) return toast('warning', '该恢复卡片已过期，请重新打开 /help。');
     const sessions = await ctx.pi.list(cwd);
     const selectedSession = sessions.find((session) => session.path === value.sessionFile);
     if (!selectedSession) return toast('error', '该 Session 不属于当前项目或已不存在。');
@@ -268,13 +270,18 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
     await ctx.sessionSyncWatcher.reconcile();
     selected = sessionDisplayName(selectedSession);
   } else return toast('warning', '不支持的卡片操作。');
-  ctx.pending.delete(pendingKey);
   if (!tid) void updateAnnouncement(ctx, event.chatId);
-  const prompt = current?.prompt;
-  if (prompt) {
-    void runPrompt(ctx, prompt.message, prompt.text).catch((error) => console.error('[card prompt]', error));
+  // 挂起消息一次性续跑（消费即删；超过 PENDING_PROMPT_MAX_MS 不再续跑）——历史卡重复点击只切换、不重复发送
+  const pendingPrompt = takePendingPrompt(ctx.pending, event.chatId, PENDING_PROMPT_MAX_MS);
+  if (pendingPrompt.kind === 'ok') {
+    void runPrompt(ctx, pendingPrompt.message, pendingPrompt.text).catch((error) => {
+      console.error('[card prompt]', error);
+      // runPrompt 内已提示的路径为 return 不 throw，此处兜底未覆盖异常，避免「提示正在处理但实际未处理」的静默失败
+      void send({ markdown: `消息处理失败：${error instanceof Error ? error.message : String(error)}` }).catch((noticeError) => console.warn('[card prompt fail notice]', noticeError));
+    });
     return toast('success', `已切换到 ${selected}，正在处理消息。`);
   }
+  if (pendingPrompt.kind === 'expired') return toast('warning', `已切换到 ${selected}。之前挂起的消息已超过 ${PENDING_PROMPT_MAX_MS / 60_000} 分钟未处理，请重新发送。`);
   return toast('success', `已切换到 ${selected}。`);
 }
 
@@ -283,6 +290,16 @@ function parseCommandTimeout(value: string | undefined): number | undefined | nu
   if (!/^\d+$/.test(value)) return null;
   const seconds = Number.parseInt(value, 10);
   return seconds >= 1 && seconds <= 86_400 ? seconds : null;
+}
+
+/** 会话文件是否存在（历史卡操作时当前 session 可能已被删除 / 换机路径失效） */
+async function sessionFileExists(sessionFile: string): Promise<boolean> {
+  try {
+    await stat(sessionFile);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function toast(type: 'success' | 'info' | 'warning' | 'error', content: string): CardActionResponse {

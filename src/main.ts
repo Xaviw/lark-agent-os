@@ -5,7 +5,7 @@ import { createLarkChannel } from '@larksuite/channel';
 import { StateStore } from './state.js';
 import { PiSessions } from './pi.js';
 import { LarkApi } from './lark-api.js';
-import { appId, appSecret, defaultWorkspace, stateRoot } from './config.js';
+import { appId, appSecret, CHANNEL_DEDUP_TTL_MS, defaultWorkspace, stateRoot } from './config.js';
 import type { BackgroundTask, CommandTask, PendingEntry } from './types.js';
 import type { AppContext } from './app-context.js';
 import { AgentRunManager } from './agent/run-manager.js';
@@ -29,7 +29,10 @@ const api = new LarkApi(appId, appSecret);
 const channel = createLarkChannel({
   appId, appSecret, domain: 'https://open.feishu.cn', source: 'lark-agent-os',
   policy: { dmMode: 'open', requireMention: false, respondToMentionAll: false },
-  safety: { chatQueue: { enabled: false } },
+  // dedup.ttl 从 SDK 默认 12h 缩短为 3s：同一卡片按钮可重复点击；快速连点由飞书平台限流
+  // （客户端提示「操作太频繁」）兜底，3s 窗口仅防极速重推/双击静默区最小化；
+  // 平台重推由应用层 event_id / 消息 messageId 去重承担（见 card-actions.ts / messages.ts）
+  safety: { chatQueue: { enabled: false }, dedup: { ttl: CHANNEL_DEDUP_TTL_MS } },
   includeRawEvent: true,
 });
 

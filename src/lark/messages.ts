@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import type { BotAddedEvent, NormalizedMessage } from '@larksuite/channel';
 import type { AppContext } from '../app-context.js';
-import { ATTACHMENT_MESSAGE_TYPES } from '../config.js';
+import { ATTACHMENT_MESSAGE_TYPES, MESSAGE_SEEN_TTL_MS } from '../config.js';
+import { createSeenSet } from '../utils/seen.js';
 import type { PiSessions } from '../pi.js';
 import type { ChatBinding } from '../types.js';
 import { botWelcomeCard, createSessionFormCard, helpCard, sessionPickerCard } from '../cards.js';
@@ -10,9 +10,17 @@ import { rememberCardThread } from './topics.js';
 import { handleChatGone, sendChat } from './chat-lifecycle.js';
 import { runPrompt } from '../agent/prompt.js';
 
+/** 消息防重复处理（messageId 去重：补偿 SDK safety dedup 窗口缩短后断线重连/平台重推的空隙；内存态，重启即清） */
+const seenMessages = createSeenSet(MESSAGE_SEEN_TTL_MS);
+
 /** 消息入口：私聊自动绑定默认工作区；群聊需 @bot 或 /help */
 export async function handleMessage(ctx: AppContext, message: NormalizedMessage): Promise<void> {
   if (!allowed(ctx, message)) return;
+  if (seenMessages.has(message.messageId)) {
+    console.debug(`[message] 拦截重复消息 ${message.messageId}`);
+    return;
+  }
+  seenMessages.add(message.messageId);
   const text = message.content.trim();
   if (message.chatType === 'p2p') await ensureDirectChat(ctx, message.chatId);
   if (text === '/help') return showHelp(ctx, message.chatId, message.messageId, message.threadId);
@@ -96,11 +104,11 @@ async function showSessionSetup(
   sessions: Awaited<ReturnType<PiSessions['list']>>,
   prompt?: { message: NormalizedMessage; text: string },
 ): Promise<void> {
-  const nonce = randomUUID();
-  ctx.pending.set(message.chatId, { nonce, prompt });
+  // 挂起消息暂存（一次性，选中/新建 session 后自动续跑）：promptAt 用于超时（PENDING_PROMPT_MAX_MS）不再续跑
+  ctx.pending.set(message.chatId, { prompt: prompt ? { message: prompt.message, text: prompt.text, promptAt: Date.now() } : undefined });
   const card = sessions.length === 0
-    ? createSessionFormCard(nonce, '新建 Session')
-    : sessionPickerCard(workspaceForChat(ctx, message.chatId), sessions, nonce);
+    ? createSessionFormCard('新建 Session')
+    : sessionPickerCard(workspaceForChat(ctx, message.chatId), sessions);
   const sent = await sendChat(ctx, message.chatId, { card }, { replyTo: message.messageId });
   rememberCardThread(sent.messageId, undefined); // 选择卡仅出现在普通消息路径（无话题），记录以命中后续卡片操作缓存
 }

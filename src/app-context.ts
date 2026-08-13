@@ -17,7 +17,7 @@ export interface AppContext {
   api: LarkApi;
   lark: LarkChannel;
   defaultWorkspace: string;
-  /** 卡片操作等待中的表单上下文（nonce 防过期） */
+  /** 挂起的消息上下文（session 选择/新建后自动续跑；消费即删） */
   pending: Map<string, PendingEntry>;
   /** 常驻（后台）任务 */
   backgroundTasks: Map<string, BackgroundTask>;

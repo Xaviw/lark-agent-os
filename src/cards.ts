@@ -27,7 +27,7 @@ export function sessionDisplayName(session: Pick<SessionInfo, 'name' | 'firstMes
     : firstMessage;
 }
 
-export function sessionPickerCard(cwd: string, sessions: SessionInfo[], nonce: string): object {
+export function sessionPickerCard(cwd: string, sessions: SessionInfo[]): object {
   const limited = sessions.slice(0, SESSION_PICKER_LIMIT);
   const overflowHint = sessions.length > SESSION_PICKER_LIMIT ? `\n\n已显示前 ${SESSION_PICKER_LIMIT} 个（共 ${sessions.length} 个），其余可用「新建会话」或直接发消息让机器人处理。` : '';
   return {
@@ -40,14 +40,14 @@ export function sessionPickerCard(cwd: string, sessions: SessionInfo[], nonce: s
           tag: 'button',
           text: { tag: 'plain_text', content: `${sessionDisplayName(session)} · ${session.messageCount} 条` },
           type: 'primary',
-          behaviors: [{ type: 'callback', value: { cmd: 'session.use', nonce, sessionFile: session.path } }],
+          behaviors: [{ type: 'callback', value: { cmd: 'session.use', sessionFile: session.path } }],
         })),
       ],
     },
   };
 }
 
-export function createSessionFormCard(nonce: string, title = '新建 Session'): object {
+export function createSessionFormCard(title = '新建 Session'): object {
   return {
     schema: '2.0',
     config: { summary: { content: title } },
@@ -58,7 +58,7 @@ export function createSessionFormCard(nonce: string, title = '新建 Session'): 
           name: 'session_create_form',
           elements: [
             { tag: 'input', name: 'name', label: { tag: 'plain_text', content: 'Session 名称' }, placeholder: { tag: 'plain_text', content: '例如：修复登录超时' }, required: true },
-            { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '新建 Session' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.create.submit', nonce } }] },
+            { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '新建 Session' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.create.submit' } }] },
           ],
         },
       ],
@@ -77,18 +77,18 @@ export function syncFormCard(): object {
   };
 }
 
-export function renameSessionFormCard(nonce: string): object {
+export function renameSessionFormCard(): object {
   return {
     schema: '2.0',
     config: { summary: { content: '重命名 Session' } },
     body: { elements: [{ tag: 'form', name: 'session_name_form', elements: [
       { tag: 'input', name: 'name', label: { tag: 'plain_text', content: 'Session 名称' }, required: true },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '保存' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.rename.submit', nonce } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '保存' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.rename.submit' } }] },
     ] }] },
   };
 }
 
-export function modelPickerCard(models: PiModelOption[], nonce: string): object {
+export function modelPickerCard(models: PiModelOption[]): object {
   return {
     schema: '2.0',
     config: { summary: { content: '选择 model' } },
@@ -96,13 +96,13 @@ export function modelPickerCard(models: PiModelOption[], nonce: string): object 
       { tag: 'markdown', content: '**选择 Provider / Model**' },
       ...models.map((model) => ({
         tag: 'button', text: { tag: 'plain_text', content: `${model.provider} / ${model.name}` }, type: 'primary',
-        behaviors: [{ type: 'callback', value: { cmd: 'model.select', nonce, provider: model.provider, modelId: model.id } }],
+        behaviors: [{ type: 'callback', value: { cmd: 'model.select', provider: model.provider, modelId: model.id } }],
       })),
     ] },
   };
 }
 
-export function thinkingLevelPickerCard(thinkingLevels: string[], nonce: string): object {
+export function thinkingLevelPickerCard(thinkingLevels: string[]): object {
   return {
     schema: '2.0',
     config: { summary: { content: '选择思考强度' } },
@@ -110,7 +110,7 @@ export function thinkingLevelPickerCard(thinkingLevels: string[], nonce: string)
       { tag: 'markdown', content: '**选择当前 model 的思考强度**' },
       ...thinkingLevels.map((thinkingLevel) => ({
         tag: 'button', text: { tag: 'plain_text', content: thinkingLevel }, type: 'primary',
-        behaviors: [{ type: 'callback', value: { cmd: 'thinkingLevel.select', nonce, thinkingLevel } }],
+        behaviors: [{ type: 'callback', value: { cmd: 'thinkingLevel.select', thinkingLevel } }],
       })),
     ] },
   };

@@ -94,10 +94,9 @@ export type AgentRun = {
   latestOutput: string;
 };
 
-/** 卡片操作等待中的表单上下文（nonce 防过期） */
+/** 挂起的消息上下文：用户发消息但未选 session 时暂存，选中/新建后自动续跑；消费即删（一次性），promptAt 防陈旧请求被历史卡误触发 */
 export type PendingEntry = {
-  nonce: string;
-  prompt?: { message: NormalizedMessage; text: string };
+  prompt?: { message: NormalizedMessage; text: string; promptAt: number };
 };
 
 export type SessionMessageEntry = {

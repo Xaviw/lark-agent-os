@@ -50,7 +50,7 @@ export async function handleChatGone(ctx: AppContext, chatId: string, error: unk
 /**
  * 清理失效群的全部本地状态（幂等）：
  * 取消该群 Agent run（queued → cancelled + inFlight 释放，running → abort）→ 终止前台命令 →
- * 清 pending（含话题前缀 key）→ 停同步调度 → 删除 binding → 触发 watcher reconcile 释放目录监听。
+ * 清 pending（key = chatId）→ 停同步调度 → 删除 binding → 触发 watcher reconcile 释放目录监听。
  * 后台任务不按群索引（BackgroundTask 无 chatId 字段），全局保留——其 cwd 可能仍有效，且不受群生命周期影响。
  */
 export async function cleanupChat(ctx: AppContext, chatId: string, reason: string): Promise<void> {

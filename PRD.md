@@ -13,7 +13,7 @@
 | 模块 | 功能点 | 优先级 |
 | --- | --- | --- |
 | 消息处理 | 触发规则、`/help` 操作面板、Agent 队列状态机、回复引用 | P0 |
-| Session 管理 | 新建 / 恢复 / 重命名 / 压缩、群绑定、过期保护 | P0 |
+| Session 管理 | 新建 / 恢复 / 重命名 / 压缩、群绑定、历史卡复用 | P0 |
 | 模型与思考强度 | provider/model 切换、thinkingLevel 设置 | P0 |
 | 项目群管理 | 创建项目群、绑定项目（bindProject）、路径解析、群公告 | P0 |
 | 命令执行 | 普通命令（流式输出）、常驻任务（后台任务）模式、bgTask 面板 | P0 |
@@ -73,7 +73,7 @@
 - 触发规则沿用原会话：群话题内须 `@bot`（`/help` 免 `@`）；私聊话题免 `@`。话题内 `@bot` 而群未绑定项目 → 仍提示先绑定。
 - **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 命令 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩）作用于**话题 session** 而非主会话。
 - **公告**：话题内不触发群公告（懒初始化建会话、切换模型、设置思考强度、重命名均跳过公告刷新）；话题不会产生独立公告。
-- **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 恢复 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 按会话隔离（话题与主会话并发操作不互相置过期）。
+- **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 恢复 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 仅主会话挂起消息使用（key = `chatId`）。
 - **不同步**：话题 session 不参与电脑端 → 飞书同步（watcher 只监听主会话 activeSessionFile）；同步游标 / 防回环 / inFlight 均不涉及话题 session（`markFeishuOriginEntries` 按主会话 activeSessionFile 匹配，话题轮次不标记、不累积；进程异常退出后 reconcile 清理话题 inFlight 仅清不标）。话题窗口内对话由飞书 → 电脑端方向直接写入共享 JSONL，电脑端 resume 可见。
 
 ### 2.2 Session 管理
@@ -84,7 +84,8 @@
 - **重命名**：名称必填，换行折叠为空格；写入 session 文件并更新公告。
 - **压缩**：`session.compact()` 异步执行；**不刷新群公告**；失败时向群发送「Session 压缩失败：<原因>」（错误信息截断 200 字符）；成功静默。
   - 边界：compact 会中止进行中的 agent 任务（pi SDK 行为，接受不处理）；失败场景含 session 过小（"Nothing to compact"）、已压缩、模型无凭证。
-- **过期保护**：卡片操作携带 nonce，与 `pending` 比对，过期提示"该操作卡片已过期，请重新打开 /help"。
+- **历史卡片复用（无 nonce）**：卡片操作不携带 nonce、不依赖 pending 过期校验，历史卡（含二级选择器/表单）可重复使用——唯一限制是飞书卡片 14/30 天交互有效期（超期客户端提示、回调不达）与平台连点限流（~10s，客户端提示「操作太频繁」）。可用性由业务校验兜底：`session.use` 校验 session 属于当前项目且存在；`session.sync.submit` / `model.select` / `thinkingLevel.select` / `session.rename.submit` 校验当前 session 文件存在（toast「该 Session 已不存在，请重新选择 Session」）；模型/思考强度由 pi SDK 校验 + 全局兜底 toast。挂起消息（`showSessionSetup` 暂存于 `pending`）在选中/新建 session 后一次性续跑（`takePendingPrompt`：消费即删；超 `PENDING_PROMPT_MAX_MS`=30 分钟不续跑并 toast 提示，防陈旧请求被历史卡误触发）。
+- **点击去重**：SDK `safety.dedup.ttl` = 3s（默认 12h 会静默拦截同一卡片同一按钮的重复点击）；快速连点（~10s 内）由飞书平台限流拦截（客户端提示「操作太频繁」，事件不发出）；应用层防重推——卡片事件按 `event_id`（30 分钟）、消息按 `messageId`（1 小时）去重（`createSeenSet`，内存态）。合法重复点击不受限（新 `event_id` 放行）。
 
 ### 2.3 模型与思考强度
 
