@@ -32,10 +32,10 @@ export function sessionPickerCard(cwd: string, sessions: SessionInfo[]): object 
   const overflowHint = sessions.length > SESSION_PICKER_LIMIT ? `\n\n已显示前 ${SESSION_PICKER_LIMIT} 个（共 ${sessions.length} 个），其余可用「新建会话」或直接发消息让机器人处理。` : '';
   return {
     schema: '2.0',
-    config: { summary: { content: '恢复 pi session' } },
+    config: { summary: { content: '切换会话' } },
     body: {
       elements: [
-        { tag: 'markdown', content: `**恢复 Session**\n\n项目：\`${cwd}\`\n\n请选择要继续的历史 session。${overflowHint}` },
+        { tag: 'markdown', content: `**切换会话**\n\n项目：\`${cwd}\`\n\n请选择要切换的历史会话。${overflowHint}` },
         ...limited.map((session) => ({
           tag: 'button',
           text: { tag: 'plain_text', content: `${sessionDisplayName(session)} · ${session.messageCount} 条` },
@@ -47,18 +47,18 @@ export function sessionPickerCard(cwd: string, sessions: SessionInfo[]): object 
   };
 }
 
-export function createSessionFormCard(title = '新建 Session'): object {
+export function createSessionFormCard(): object {
   return {
     schema: '2.0',
-    config: { summary: { content: title } },
+    config: { summary: { content: '新建会话' } },
     body: {
       elements: [
         {
           tag: 'form',
           name: 'session_create_form',
           elements: [
-            { tag: 'input', name: 'name', label: { tag: 'plain_text', content: 'Session 名称' }, placeholder: { tag: 'plain_text', content: '例如：修复登录超时' }, required: true },
-            { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '新建 Session' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.create.submit' } }] },
+            { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '会话名称' }, placeholder: { tag: 'plain_text', content: '例如：修复登录超时' }, required: true },
+            { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '新建会话' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.create.submit' } }] },
           ],
         },
       ],
@@ -69,7 +69,7 @@ export function createSessionFormCard(title = '新建 Session'): object {
 export function syncFormCard(): object {
   return {
     schema: '2.0',
-    config: { summary: { content: '同步 Session' } },
+    config: { summary: { content: '同步消息' } },
     body: { elements: [{ tag: 'form', name: 'session_sync_form', elements: [
       { tag: 'input', name: 'count', label: { tag: 'plain_text', content: '同步最新轮数（可选）' }, placeholder: { tag: 'plain_text', content: '留空同步全部新消息' } },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '同步' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.sync.submit' } }] },
@@ -80,9 +80,9 @@ export function syncFormCard(): object {
 export function renameSessionFormCard(): object {
   return {
     schema: '2.0',
-    config: { summary: { content: '重命名 Session' } },
+    config: { summary: { content: '重命名会话' } },
     body: { elements: [{ tag: 'form', name: 'session_name_form', elements: [
-      { tag: 'input', name: 'name', label: { tag: 'plain_text', content: 'Session 名称' }, required: true },
+      { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '会话名称' }, required: true },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '保存' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.rename.submit' } }] },
     ] }] },
   };
@@ -141,7 +141,7 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
   const bindingStatus = mode === 'topic'
     ? (bound ? '\n\n话题固定使用该工作路径，不支持修改。' : '\n\n此群尚未绑定项目，请先绑定。\n\n话题固定使用该工作路径，不支持修改。')
     : bound ? '' : '\n\n此群尚未绑定项目，请先绑定。';
-  const sessionStatus = mode === 'topic' ? '' : (hasSession ? '' : '\n\n尚未选择 Session，请使用「新建会话」或「切换会话」。');
+  const sessionStatus = mode === 'topic' ? '' : (hasSession ? '' : '\n\n尚未选择会话，请使用「新建会话」或「切换会话」。');
   const button = (label: string, cmd: string) => ({ tag: 'button', text: { tag: 'plain_text', content: label }, type: 'primary', behaviors: [{ type: 'callback', value: { cmd } }] });
   // 话题模式去掉：新建会话 / 切换会话 / 绑定项目 / 同步消息（话题 = 独立 session，无手动会话管理；话题 session 不参与同步）
   const sessionRowButtons = mode === 'topic'

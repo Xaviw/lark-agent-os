@@ -7,7 +7,7 @@ export async function createProject(ctx: AppContext, userId: string, name: strin
   const created = await ctx.lark.createChat({ name, inviteUserIds: [userId], userIdType: 'open_id' });
   ctx.state.set(created.chatId, { cwd, chatType: 'group', updatedAt: new Date().toISOString() });
   await ctx.state.flush();
-  await sendChat(ctx, created.chatId, { markdown: `已创建项目群 **${name}**\n\n工作目录：\`${cwd}\`\n\n请使用 \`/help\` 选择 new 或 resume。` });
+  await sendChat(ctx, created.chatId, { markdown: `已创建项目群 **${name}**\n\n工作目录：\`${cwd}\`\n\n请使用 \`/help\` 打开操作面板，再选择「新建会话」或「切换会话」。` });
   await updateAnnouncement(ctx, created.chatId);
   return created;
 }

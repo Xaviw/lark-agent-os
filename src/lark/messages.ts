@@ -107,7 +107,7 @@ async function showSessionSetup(
   // 挂起消息暂存（一次性，选中/新建 session 后自动续跑）：promptAt 用于超时（PENDING_PROMPT_MAX_MS）不再续跑
   ctx.pending.set(message.chatId, { prompt: prompt ? { message: prompt.message, text: prompt.text, promptAt: Date.now() } : undefined });
   const card = sessions.length === 0
-    ? createSessionFormCard('新建 Session')
+    ? createSessionFormCard()
     : sessionPickerCard(workspaceForChat(ctx, message.chatId), sessions);
   const sent = await sendChat(ctx, message.chatId, { card }, { replyTo: message.messageId });
   rememberCardThread(sent.messageId, undefined); // 选择卡仅出现在普通消息路径（无话题），记录以命中后续卡片操作缓存

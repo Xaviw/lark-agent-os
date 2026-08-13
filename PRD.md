@@ -13,7 +13,7 @@
 | 模块 | 功能点 | 优先级 |
 | --- | --- | --- |
 | 消息处理 | 触发规则、`/help` 操作面板、Agent 队列状态机、回复引用 | P0 |
-| Session 管理 | 新建 / 恢复 / 重命名 / 压缩、群绑定、历史卡复用 | P0 |
+| 会话管理 | 新建 / 切换 / 重命名 / 压缩、群绑定、历史卡复用 | P0 |
 | 模型与思考强度 | provider/model 切换、thinkingLevel 设置 | P0 |
 | 项目群管理 | 创建项目群、绑定项目（bindProject）、路径解析、群公告 | P0 |
 | 命令执行 | 普通命令（流式输出）、常驻任务（后台任务）模式、bgTask 面板 | P0 |
@@ -47,7 +47,7 @@
 | 2 | 新建会话 `session.new.form` · 压缩会话 `session.compact` · 切换会话 `session.resume.form` · 同步消息 `session.sync.form` |
 | 3 | 执行命令 `command.form` · 创建项目群 `project.create.form` · 绑定项目 `project.bind.form` · 后台任务 `bgTask.form` |
 
-- 提示语：未绑定群 →"此群尚未绑定项目，请先绑定。"；已绑定未选 Session →"请使用"新建会话"或"切换会话"。"（话题模式不显示绑定 / Session 提示，按钮裁剪见「话题窗口（thread）」）
+- 提示语：未绑定群 →"此群尚未绑定项目，请先绑定。"；已绑定未选会话 →"请使用"新建会话"或"切换会话"。"（话题模式不显示绑定 / Session 提示，按钮裁剪见「话题窗口（thread）」）
 
 **Agent 队列与状态机**
 
@@ -73,25 +73,25 @@
 - 触发规则沿用原会话：群话题内须 `@bot`（`/help` 免 `@`）；私聊话题免 `@`。话题内 `@bot` 而群未绑定项目 → 仍提示先绑定。
 - **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 命令 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩）作用于**话题 session** 而非主会话。
 - **公告**：话题内不触发群公告（懒初始化建会话、切换模型、设置思考强度、重命名均跳过公告刷新）；话题不会产生独立公告。
-- **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 恢复 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 仅主会话挂起消息使用（key = `chatId`）。
+- **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 切换 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 仅主会话挂起消息使用（key = `chatId`）。
 - **不同步**：话题 session 不参与电脑端 → 飞书同步（watcher 只监听主会话 activeSessionFile）；同步游标 / 防回环 / inFlight 均不涉及话题 session（`markFeishuOriginEntries` 按主会话 activeSessionFile 匹配，话题轮次不标记、不累积；进程异常退出后 reconcile 清理话题 inFlight 仅清不标）。话题窗口内对话由飞书 → 电脑端方向直接写入共享 JSONL，电脑端 resume 可见。
 
-### 2.2 Session 管理
+### 2.2 会话管理
 
-- **绑定**：每群一个 `activeSessionFile`；已绑定但未选 Session 时，首次普通消息自动弹 `新建会话` / `切换会话` 选择卡（未绑定群先提示绑定，见 2.1）。
-- **新建**：名称必填；成功后发送确认消息、更新群公告；无历史 Session 时直接展示新建表单。
-- **恢复**：列表显示"显示名称 + 消息条数"（最多显示前 10 个，超出提示可用新建会话或直接发消息处理）；名称优先级：自定义名称 > 首条用户消息前 48 字符（超出 `…` 截断）> "未命名会话"；校验 Session 属于当前项目且存在；恢复后更新公告；若由普通消息触发则继续处理该消息。
+- **绑定**：每群一个 `activeSessionFile`；已绑定但未选会话时，首次普通消息自动弹 `新建会话` / `切换会话` 选择卡（未绑定群先提示绑定，见 2.1）。
+- **新建**：名称必填；成功后发送确认消息、更新群公告；无历史会话时直接展示新建表单。
+- **切换会话**：列表显示"显示名称 + 消息条数"（最多显示前 10 个，超出提示可用新建会话或直接发消息处理）；名称优先级：自定义名称 > 首条用户消息前 48 字符（超出 `…` 截断）> "未命名会话"；校验会话属于当前项目且存在；切换后更新公告；若由普通消息触发则继续处理该消息。
 - **重命名**：名称必填，换行折叠为空格；写入 session 文件并更新公告。
-- **压缩**：`session.compact()` 异步执行；**不刷新群公告**；失败时向群发送「Session 压缩失败：<原因>」（错误信息截断 200 字符）；成功静默。
+- **压缩**：`session.compact()` 异步执行；**不刷新群公告**；失败时向群发送「会话压缩失败：<原因>」（错误信息截断 200 字符）；成功静默。
   - 边界：compact 会中止进行中的 agent 任务（pi SDK 行为，接受不处理）；失败场景含 session 过小（"Nothing to compact"）、已压缩、模型无凭证。
-- **历史卡片复用（无 nonce）**：卡片操作不携带 nonce、不依赖 pending 过期校验，历史卡（含二级选择器/表单）可重复使用——唯一限制是飞书卡片 14/30 天交互有效期（超期客户端提示、回调不达）与平台连点限流（~10s，客户端提示「操作太频繁」）。可用性由业务校验兜底：`session.use` 校验 session 属于当前项目且存在；`session.sync.submit` / `model.select` / `thinkingLevel.select` / `session.rename.submit` 校验当前 session 文件存在（toast「该 Session 已不存在，请重新选择 Session」）；模型/思考强度由 pi SDK 校验 + 全局兜底 toast。挂起消息（`showSessionSetup` 暂存于 `pending`）在选中/新建 session 后一次性续跑（`takePendingPrompt`：消费即删；超 `PENDING_PROMPT_MAX_MS`=30 分钟不续跑并 toast 提示，防陈旧请求被历史卡误触发）。
+- **历史卡片复用（无 nonce）**：卡片操作不携带 nonce、不依赖 pending 过期校验，历史卡（含二级选择器/表单）可重复使用——唯一限制是飞书卡片 14/30 天交互有效期（超期客户端提示、回调不达）与平台连点限流（~10s，客户端提示「操作太频繁」）。可用性由业务校验兜底：`session.use` 校验 session 属于当前项目且存在；`session.sync.submit` / `model.select` / `thinkingLevel.select` / `session.rename.submit` 校验当前 session 文件存在（toast「该会话已不存在，请使用「切换会话」重新选择」）；模型/思考强度由 pi SDK 校验 + 全局兜底 toast。挂起消息（`showSessionSetup` 暂存于 `pending`）在选中/新建会话后一次性续跑（`takePendingPrompt`：消费即删；超 `PENDING_PROMPT_MAX_MS`=30 分钟不续跑并 toast 提示，防陈旧请求被历史卡误触发）。
 - **点击去重**：SDK `safety.dedup.ttl` = 3s（默认 12h 会静默拦截同一卡片同一按钮的重复点击）；快速连点（~10s 内）由飞书平台限流拦截（客户端提示「操作太频繁」，事件不发出）；应用层防重推——卡片事件按 `event_id`（30 分钟）、消息按 `messageId`（1 小时）去重（`createSeenSet`，内存态）。合法重复点击不受限（新 `event_id` 放行）。
 
 ### 2.3 模型与思考强度
 
 - **模型切换**：`model.form` 列出 `ModelRuntime` 可用模型，`model.select` 调用 `setModel()` 并持久化到 session、更新公告；无可用模型提示。
 - **思考强度**：`thinkingLevel.form` 列出 `getAvailableThinkingLevels()`，`thinkingLevel.select` 调用 `setThinkingLevel()`；当前 model 不支持时提示。
-- 边界：切换模型后可用强度随之变化；两者均需已选 Session。
+- 边界：切换模型后可用强度随之变化；两者均需已选会话。
 
 ### 2.4 项目群管理
 
@@ -106,7 +106,7 @@
 - 未绑定群：新增绑定；已绑定群：修改绑定（覆盖 `cwd`）；表单仅工作路径（必填）。
 - 表单标题按状态区分：「绑定项目」（未绑定）/「修改绑定」（已绑定）。
 - 提交成功后：`state.update({ cwd, chatType: 'group', activeSessionFile: undefined, sessionSync: undefined, feishuOriginEntryIds: undefined, inFlightFeishuRun: undefined })` → `flush` → `reconcile` → 更新公告。
-- 边界：清空 `activeSessionFile` 后下一条普通消息自动走 `新建会话` / `切换会话` 选择卡（与切换 Session 同策略）；**分支须在绑定检查（`if (!binding)`）之前**，未绑定群才能使用；p2p 不适用（固定默认工作区）。
+- 边界：清空 `activeSessionFile` 后下一条普通消息自动走 `新建会话` / `切换会话` 选择卡（与切换会话同策略）；**分支须在绑定检查（`if (!binding)`）之前**，未绑定群才能使用；p2p 不适用（固定默认工作区）。
 
 **私聊自动绑定**：私聊首条消息自动绑定 `LARK_DEFAULT_WORKSPACE`；已有绑定但路径不符则覆盖。
 
@@ -121,8 +121,8 @@
   Work Path: <cwd>
   Session: <session 显示名称>
   ```
-- 触发时机：切换 / 新建 / 恢复 / 重命名 Session、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）。
-- 首条公告创建后置顶（pin）；私聊不维护；无公告编辑权限时降级为日志告警。**话题窗口不维护公告**：话题内产生的操作（懒初始化建会话、切换模型、设置思考强度、重命名）均跳过公告刷新（见「话题窗口（thread）」）。未选 Session 时（如改绑后）公告更新为占位内容（`Session: 未选择`），避免残留旧项目信息；**从未有过公告的群不创建占位公告**（避免未选 session 就置顶），首条公告仍由首次选 session 触发。
+- 触发时机：新建会话 / 切换会话 / 重命名会话、切换模型、设置 thinkingLevel、服务启动（**不含 compact**）。
+- 首条公告创建后置顶（pin）；私聊不维护；无公告编辑权限时降级为日志告警。**话题窗口不维护公告**：话题内产生的操作（懒初始化建会话、切换模型、设置思考强度、重命名）均跳过公告刷新（见「话题窗口（thread）」）。未选会话时（如改绑后）公告更新为占位内容（`Session: 未选择`），避免残留旧项目信息；**从未有过公告的群不创建占位公告**（避免未选 session 就置顶），首条公告仍由首次选 session 触发。
 
 ### 2.5 命令执行
 

@@ -148,7 +148,7 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
       return toast('error', error instanceof Error ? error.message : '工作路径无效。');
     }
     const bound = Boolean(ctx.state.get(event.chatId));
-    // 绑定/改绑后清空活动 session 与同步状态，下一条普通消息自动走 new / resume 选择卡（与切换 session 同策略）
+    // 绑定/改绑后清空活动 session 与同步状态，下一条普通消息自动走「新建会话」/「切换会话」选择卡（与切换 session 同策略）
     ctx.state.update(event.chatId, {
       cwd,
       chatType: 'group',
@@ -181,19 +181,20 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   const tid = await resolveThread();
   const activeSessionFile = tid ? await ensureThreadSession(ctx, event.chatId, tid, cwd) : binding.activeSessionFile;
   const requireActiveSession = (): string | undefined => activeSessionFile;
+  const selectSessionHint = '请先使用「新建会话」或「切换会话」。';
 
   if (cmd === 'session.new.form') {
-    await send({ card: createSessionFormCard('新建 Session') });
-    return toast('success', '请填写 Session 名称。');
+    await send({ card: createSessionFormCard() });
+    return toast('success', '请填写会话名称。');
   }
   if (cmd === 'session.resume.form') {
     const sessions = await ctx.pi.list(cwd);
-    if (sessions.length === 0) return toast('warning', '当前路径没有可恢复的 Session，请使用 new。');
+    if (sessions.length === 0) return toast('warning', '当前工作路径没有可切换的历史会话，请使用「新建会话」。');
     await send({ card: sessionPickerCard(cwd, sessions) });
-    return toast('success', '请选择要恢复的 Session。');
+    return toast('success', '请选择要切换的历史会话。');
   }
   if (cmd === 'model.form') {
-    if (!requireActiveSession()) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!requireActiveSession()) return toast('warning', selectSessionHint);
     const models = await ctx.pi.models();
     if (models.length === 0) return toast('error', '没有可用的 provider/model。');
     await send({ card: modelPickerCard(models) });
@@ -201,67 +202,67 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   }
   if (cmd === 'thinkingLevel.form') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!sessionFile) return toast('warning', selectSessionHint);
     const thinkingLevels = await ctx.pi.thinkingLevels(cwd, sessionFile);
     if (thinkingLevels.length === 0) return toast('warning', '当前 model 不支持思考强度设置。');
     await send({ card: thinkingLevelPickerCard(thinkingLevels) });
     return toast('success', '请选择思考强度。');
   }
   if (cmd === 'session.sync.form') {
-    if (!requireActiveSession()) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!requireActiveSession()) return toast('warning', selectSessionHint);
     await send({ card: syncFormCard() });
     return toast('success', '请填写同步条数。');
   }
   if (cmd === 'session.sync.submit') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
+    if (!sessionFile) return toast('warning', selectSessionHint);
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该会话已不存在，请使用「切换会话」重新选择。');
     const count = parseSyncCount(cardFormValue(event).count);
     if (count === null) return toast('error', '同步条数必须是正整数。');
     const result = await syncComputerSessions(ctx, event.chatId, 'manual', count);
-    if (result.retry) return toast('warning', 'Session 正在写入，请稍后重试。');
+    if (result.retry) return toast('warning', '会话正在写入，请稍后重试。');
     if (result.busy) return toast('warning', 'Agent 正在处理消息，请稍后再同步。');
-    if (result.progressReset) return toast('warning', 'Session 文件已更新（可能已压缩），同步进度已重置。请再次同步；结果可能包含已发送的历史轮次。');
+    if (result.progressReset) return toast('warning', '会话文件已更新（可能已压缩），同步进度已重置。请再次同步；结果可能包含已发送的历史轮次。');
     if (result.sent === 0) await send({ markdown: '无待同步消息。' });
     return toast('success', result.sent ? `已同步 ${result.sent} 轮对话${result.truncated ? '（内容已截断）' : ''}。` : '无待同步消息。');
   }
   if (cmd === 'session.rename.form') {
-    if (!requireActiveSession()) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!requireActiveSession()) return toast('warning', selectSessionHint);
     await send({ card: renameSessionFormCard() });
-    return toast('success', '请填写 Session 名称。');
+    return toast('success', '请填写会话名称。');
   }
   if (cmd === 'session.compact') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
+    if (!sessionFile) return toast('warning', selectSessionHint);
     void ctx.pi.compact(cwd, sessionFile).catch((error) => {
       console.error('[compact]', error);
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-      void send({ markdown: `Session 压缩失败：${reason}` }).catch((noticeError) => console.warn('[compact fail notice]', noticeError));
+      void send({ markdown: `会话压缩失败：${reason}` }).catch((noticeError) => console.warn('[compact fail notice]', noticeError));
     });
-    return toast('success', '正在压缩 Session 上下文。');
+    return toast('success', '正在压缩会话上下文。');
   }
   if (cmd === 'model.select' && typeof value.provider === 'string' && typeof value.modelId === 'string') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
+    if (!sessionFile) return toast('warning', selectSessionHint);
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该会话已不存在，请使用「切换会话」重新选择。');
     const selected = await ctx.pi.setModel(cwd, sessionFile, value.provider, value.modelId);
     if (!tid) void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已切换到 ${selected.provider}/${selected.name}。`);
   }
   if (cmd === 'thinkingLevel.select' && typeof value.thinkingLevel === 'string') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
+    if (!sessionFile) return toast('warning', selectSessionHint);
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该会话已不存在，请使用「切换会话」重新选择。');
     await ctx.pi.setThinkingLevel(cwd, sessionFile, value.thinkingLevel as PiThinkingLevel);
     if (!tid) void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已设置思考强度：${value.thinkingLevel}。`);
   }
   if (cmd === 'session.rename.submit') {
     const sessionFile = requireActiveSession();
-    if (!sessionFile) return toast('warning', '请先使用 new 或 resume 选择 Session。');
-    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该 Session 已不存在，请重新选择 Session。');
+    if (!sessionFile) return toast('warning', selectSessionHint);
+    if (!(await sessionFileExists(sessionFile))) return toast('warning', '该会话已不存在，请使用「切换会话」重新选择。');
     const name = cardFormValue(event).name.replace(/[\r\n]+/g, ' ').trim();
-    if (!name) return toast('error', '请填写 Session 名称。');
+    if (!name) return toast('error', '请填写会话名称。');
     await ctx.pi.rename(cwd, sessionFile, name);
     if (!tid) void updateAnnouncement(ctx, event.chatId);
     return toast('success', `已命名为 ${name}。`);
@@ -269,13 +270,13 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   let selected: string;
   if (cmd === 'session.create.submit') {
     const name = cardFormValue(event).name.replace(/[\r\n]+/g, ' ').trim();
-    if (!name) return toast('error', '请填写 Session 名称。');
+    if (!name) return toast('error', '请填写会话名称。');
     await useNewSession(ctx, event.chatId, cwd, name);
     selected = name;
   } else if (cmd === 'session.use' && typeof value.sessionFile === 'string') {
     const sessions = await ctx.pi.list(cwd);
     const selectedSession = sessions.find((session) => session.path === value.sessionFile);
-    if (!selectedSession) return toast('error', '该 Session 不属于当前项目或已不存在。');
+    if (!selectedSession) return toast('error', '该会话不属于当前项目或已不存在。');
     ctx.state.update(event.chatId, { activeSessionFile: value.sessionFile, sessionSync: undefined });
     await ctx.state.flush();
     await ctx.sessionSyncWatcher.reconcile();

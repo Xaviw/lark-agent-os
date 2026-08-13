@@ -17,7 +17,7 @@ export async function useNewSession(ctx: AppContext, chatId: string, cwd: string
   await ctx.state.flush();
   await ctx.sessionSyncWatcher.reconcile();
   await updateAnnouncement(ctx, chatId);
-  await sendChat(ctx, chatId, { markdown: `已新建 session：\`${name}\`` });
+  await sendChat(ctx, chatId, { markdown: `已新建会话：\`${name}\`` });
 }
 
 /** 快段产物：不含附件段的 prompt 骨架 + 待下载资源列表 */
