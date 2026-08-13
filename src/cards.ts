@@ -1,10 +1,18 @@
 import type { SessionInfo } from '@earendil-works/pi-coding-agent';
 import type { PiModelOption } from './pi.js';
+import { COMMAND_FOLD_PREVIEW_LIMIT, COMMAND_FOLD_THRESHOLD } from './config.js';
 import { escapeCommand, formatTimestamp, markdownCodeBlock } from './utils/format.js';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 const CARD_MARKDOWN_LIMIT = 6_000;
 const SESSION_PICKER_LIMIT = 10;
+/** 压缩会话的二次确认文案（help 群模式 / 话题模式共用，改文案只需改此处） */
+const COMPACT_CONFIRM = { title: '确认压缩会话？', text: '压缩将丢弃较早的对话上下文，且会中止进行中的任务，不可撤销。确定继续吗？' };
+
+/** 危险操作按钮的二次确认弹窗（纯客户端行为，确认后照常回调；title 必填） */
+function confirmDialog(title: string, text: string): object {
+  return { title: { tag: 'plain_text', content: title }, text: { tag: 'plain_text', content: text } };
+}
 
 function limitedMarkdown(content: string): string {
   if (content.length <= CARD_MARKDOWN_LIMIT) return content;
@@ -127,7 +135,9 @@ export function agentRunningCard(taskId: string, prompt: string, output?: string
   const response = output ? `\n\n${output}` : '';
   return { schema: '2.0', config: { summary: { content: 'Agent 正在处理' } }, body: { elements: [
     { tag: 'markdown', content: limitedMarkdown(`**Agent 正在处理**\n\n请求：${escapeCommand(prompt)}\n\n状态：执行中${response}`) },
-    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'agent.stop', taskId } }] },
+    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger',
+      confirm: confirmDialog('确认停止 Agent？', '将中止当前处理，已生成的内容可能不完整。确定停止吗？'),
+      behaviors: [{ type: 'callback', value: { cmd: 'agent.stop', taskId } }] },
   ] } };
 }
 
@@ -142,11 +152,17 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
     ? (bound ? '\n\n话题固定使用该工作路径，不支持修改。' : '\n\n此群尚未绑定项目，请先绑定。\n\n话题固定使用该工作路径，不支持修改。')
     : bound ? '' : '\n\n此群尚未绑定项目，请先绑定。';
   const sessionStatus = mode === 'topic' ? '' : (hasSession ? '' : '\n\n尚未选择会话，请使用「新建会话」或「切换会话」。');
-  const button = (label: string, cmd: string) => ({ tag: 'button', text: { tag: 'plain_text', content: label }, type: 'primary', behaviors: [{ type: 'callback', value: { cmd } }] });
+  const button = (label: string, cmd: string, confirm?: { title: string; text: string }) => ({
+    tag: 'button',
+    text: { tag: 'plain_text', content: label },
+    type: 'primary',
+    ...(confirm ? { confirm: confirmDialog(confirm.title, confirm.text) } : {}),
+    behaviors: [{ type: 'callback', value: { cmd } }],
+  });
   // 话题模式去掉：新建会话 / 切换会话 / 绑定项目 / 同步消息（话题 = 独立 session，无手动会话管理；话题 session 不参与同步）
   const sessionRowButtons = mode === 'topic'
-    ? [button('压缩会话', 'session.compact')]
-    : [button('新建会话', 'session.new.form'), button('压缩会话', 'session.compact'), button('切换会话', 'session.resume.form'), button('同步消息', 'session.sync.form')];
+    ? [button('压缩会话', 'session.compact', COMPACT_CONFIRM)]
+    : [button('新建会话', 'session.new.form'), button('压缩会话', 'session.compact', COMPACT_CONFIRM), button('切换会话', 'session.resume.form'), button('同步消息', 'session.sync.form')];
   const projectRowButtons = mode === 'topic'
     ? [button('执行命令', 'command.form'), button('创建项目群', 'project.create.form'), button('后台任务', 'bgTask.form')]
     : [button('执行命令', 'command.form'), button('创建项目群', 'project.create.form'), button('绑定项目', 'project.bind.form'), button('后台任务', 'bgTask.form')];
@@ -198,12 +214,36 @@ export function commandRunningCard(taskId: string, command: string, cwd: string,
   const latestOutput = output ? `\n\n${markdownCodeBlock(output.slice(-8_000))}` : '';
   return { schema: '2.0', config: { summary: { content: '命令正在执行' } }, body: { elements: [
     { tag: 'markdown', content: limitedMarkdown(`**命令正在执行**\n\n\`$ ${escapeCommand(command)}\`\n工作路径：\`${cwd}\`\n状态：执行中${timeout}${latestOutput}`) },
-    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'command.stop', taskId } }] },
+    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger',
+      confirm: confirmDialog('确认停止命令？', '将终止正在执行的命令进程。确定停止吗？'),
+      behaviors: [{ type: 'callback', value: { cmd: 'command.stop', taskId } }] },
   ] } };
 }
 
 export function commandFinalCard(title: string, output: string, elapsed?: string): object {
-  return { schema: '2.0', config: { summary: { content: title } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**${title}**\n\n${elapsed ? `耗时：${elapsed}\n\n` : ''}${output}`) }] } };
+  const elapsedLine = elapsed ? `耗时：${elapsed}\n\n` : '';
+  // 按码点计数/切分（emoji 代理对算 1 个字符），与 preview 切分单位一致，避免阈值判定与截断口径不一
+  const outputChars = Array.from(output);
+  if (outputChars.length <= COMMAND_FOLD_THRESHOLD) {
+    return { schema: '2.0', config: { summary: { content: title } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**${title}**\n\n${elapsedLine}${output}`) }] } };
+  }
+  // 超长输出：默认只显示首屏，完整输出收进默认收起的 collapsible_panel，展开可见全部
+  const preview = outputChars.slice(0, COMMAND_FOLD_PREVIEW_LIMIT).join('');
+  return { schema: '2.0', config: { summary: { content: title } }, body: { elements: [
+    { tag: 'markdown', content: `**${title}**\n\n${elapsedLine}${closeCodeFence(preview, output)}\n\n（输出较长，完整内容见下方「查看输出」）` },
+    { tag: 'collapsible_panel', expanded: false, header: { title: { tag: 'plain_text', content: `查看输出（${outputChars.length} 字符）` } }, elements: [{ tag: 'markdown', content: limitedMarkdown(output) }] },
+  ] } };
+}
+
+/**
+ * 给 output 的前缀片段补一个闭合的 code fence，使其作为独立 markdown 片段可安全渲染。
+ * 片段可能切在动态 fence（长度 = 内容最长反引号串 + 1）内部，故闭合 fence 长度取全量
+ * output 最长反引号串 + 1（必 ≥ 前缀内任意反引号串，保证闭合）。
+ */
+export function closeCodeFence(partial: string, full: string): string {
+  let longest = 0;
+  for (const match of full.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
+  return `${partial}\n${'`'.repeat(Math.max(3, longest + 1))}`;
 }
 
 export function createProjectFormCard(baseCwd: string): object {
@@ -223,7 +263,9 @@ export function bgTaskListCard(tasks: Array<{ id: string; command: string; start
     : { tag: 'markdown', content: `**后台任务（${tasks.length}）**\n\n${tasks.map((task) => `\`$ ${escapeCommand(task.command)}\`\n启动时间：${formatTimestamp(task.startedAt)}`).join('\n\n')}` };
   const stopButtons = tasks.map((task) => {
     const label = task.command.length > 16 ? `${task.command.slice(0, 16)}…` : task.command;
-    return { tag: 'button', text: { tag: 'plain_text', content: `停止：${label}` }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'bgTask.stop', taskId: task.id } }] };
+    return { tag: 'button', text: { tag: 'plain_text', content: `停止：${label}` }, type: 'danger',
+      confirm: confirmDialog('确认停止任务？', '该后台任务将立即终止，无法恢复。确定停止吗？'),
+      behaviors: [{ type: 'callback', value: { cmd: 'bgTask.stop', taskId: task.id } }] };
   });
   return { schema: '2.0', config: { summary: { content: '后台任务' } }, body: { elements: [header, ...(stopButtons.length > 0 ? [{ tag: 'hr' }, ...stopButtons] : [])] } };
 }
