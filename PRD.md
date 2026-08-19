@@ -270,6 +270,7 @@ lark-agent-os（单进程 + 实例锁）
 
 - 飞书应用：启用机器人消息事件（WebSocket）；`im:chat`（建群）；群公告 Docx API 需在群内且具公告编辑权限（群主 / 管理员限定群需额外权限）。
 - pi SDK：读取本机 `~/.pi/agent` 的 provider / model / auth 配置。
+- pi 扩展：飞书会话与 pi CLI 共享用户级扩展（`~/.pi/agent/settings.json` 的 `packages`，如 pi-mcp-adapter / pi-web-access / pi-subagents）；会话打开时 `bindExtensions` 触发 `session_start` 初始化（否则 pi-mcp-adapter 不启动、`mcp` 工具调用返回 "MCP not initialized"），释放时发 `session_shutdown` 清理。
 - 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`（前置 `chcp 65001` 切 UTF-8 代码页）、POSIX `$SHELL`（默认 `/bin/sh`）。
 
 ---
@@ -286,3 +287,5 @@ lark-agent-os（单进程 + 实例锁）
 8. 群公告无权限时静默降级（仅日志）。
 9. 后台任务不持久化（服务重启后不恢复，仅关闭时清理）。
 10. `checker` 组件需飞书客户端 V7.9+（低版本显示占位）。
+11. 每会话独立 MCP runtime（与 pi CLI 一致）：server 懒连接按需 spawn 进程，LRU 上限 32 个会话可共存多份同款进程，会话淘汰 / 服务关闭时经 `session_shutdown` 清理。
+12. 扩展工具面：`mcp` / `web_search` / `subagent` 等扩展工具对可私聊机器人的成员（`dmMode: 'open'`）可用，`~/.pi/agent/mcp.json` 中 server 的内嵌凭据（如 figma API key）随之暴露给对话方；如需限制可配置适配器 `approveTools` 或收紧 bot 可见范围。

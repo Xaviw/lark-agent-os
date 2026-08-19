@@ -265,7 +265,7 @@ export class PiSessions {
     try {
       return this.statusFor(session);
     } finally {
-      session.dispose();
+      await this.disposeSession(session);
       await rm(directory, { recursive: true, force: true });
     }
   }
@@ -324,7 +324,7 @@ export class PiSessions {
     try {
       await this.persistInitialSession(sessionManager);
     } finally {
-      session.dispose();
+      await this.disposeSession(session);
     }
   }
 
@@ -363,12 +363,13 @@ export class PiSessions {
         modelRuntime: await this.modelRuntimePromise,
         sessionManager: SessionManager.open(sessionFile, undefined, cwd),
       });
+      await this.bindSessionExtensions(session);
       return session;
     })().then((session) => {
       this.opening.delete(sessionFile);
       if (this.disposed) {
         // 关闭后完成的创建：立即释放，不入缓存，并对调用方报错（shutdown 竞态下不允许继续使用已关闭实例）
-        void session.dispose();
+        void this.disposeSession(session).catch((error) => console.error('[pi] 会话释放失败:', error));
         throw new Error('PiSessions 已关闭');
       }
       this.sessions.set(sessionFile, session);
@@ -381,19 +382,53 @@ export class PiSessions {
     return created;
   }
 
+  /**
+   * 会话打开后绑定扩展：SDK 的 createAgentSession 不会自动向扩展发 session_start 事件，
+   * 而 pi-mcp-adapter 等扩展在 session_start 时才初始化（MCP server 懒连接），不绑定会导致
+   * mcp 工具调用返回 "MCP not initialized"。绑定失败仅记日志，不影响内置工具与会话。
+   */
+  private async bindSessionExtensions(session: AgentSession): Promise<void> {
+    try {
+      await session.bindExtensions({ mode: 'print' });
+    } catch (error) {
+      console.error('[pi] 扩展 session_start 处理失败（mcp 等扩展工具可能不可用）:', error);
+    }
+  }
+
+  /** 向扩展发 session_shutdown，让 pi-mcp-adapter 停止 MCP runtime 避免 server 进程泄漏；emit 不会 reject（SDK 内部吞掉 handler 异常） */
+  private shutdownSessionExtensions(session: AgentSession): Promise<void> {
+    try {
+      return session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    } catch (error) {
+      console.error('[pi] 扩展 session_shutdown 处理失败:', error);
+      return Promise.resolve();
+    }
+  }
+
+  /**
+   * 统一释放路径：先发 session_shutdown 再 dispose。所有释放点（临时会话 / LRU 淘汰 / shutdown / 竞态分支）
+   * 都走这里；未 bind 的临时会话也安全（适配器对 null state 是 no-op，且能停掉 eager server 的加载时初始化）。
+   */
+  private async disposeSession(session: AgentSession): Promise<void> {
+    await this.shutdownSessionExtensions(session);
+    session.dispose();
+  }
+
   private pruneSessions(): void {
     if (this.sessions.size <= PI_SESSION_CACHE_LIMIT) return;
     for (const [sessionFile, session] of this.sessions) {
       if (this.sessions.size <= PI_SESSION_CACHE_LIMIT) break;
       if (this.sessionUsers.has(sessionFile) || this.opening.has(sessionFile)) continue;
-      session.dispose();
+      // dispose 先于 shutdown handler 的微任务执行，但当前扩展的 session_shutdown handler 均不访问 ctx
+      // （其 getter 在 invalidate 后会 assertActive 抛错），清理不受影响；disposeSession 仍可能因 dispose 抛错，故保留 catch
+      void this.disposeSession(session).catch((error) => console.error('[pi] 会话释放失败:', error));
       this.sessions.delete(sessionFile);
     }
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
-    for (const session of this.sessions.values()) session.dispose();
+    await Promise.allSettled([...this.sessions.values()].map((session) => this.disposeSession(session)));
     this.sessions.clear();
     this.sessionLocks.clear();
     this.operationCounts.clear();

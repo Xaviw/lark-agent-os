@@ -22,6 +22,7 @@
   1. `pnpm typecheck` + `pnpm build`；
   2. 纯逻辑（如 `selectSyncTurns`、`truncateSyncRows`、节流、卡片构建）用**临时 tsx 脚本**直接 import 项目模块验证边界，通过后删除，不留项目内；注意 `config.ts` 顶层会解析 env（缺 `LARK_APP_ID` 抛错），脚本需先设 `LARK_APP_ID` / `LARK_APP_SECRET` 再动态 import（ESM 静态 import 先于赋值执行）；
   3. 端到端需真实飞书凭据，无法在本地自动验证——依赖上一步的逻辑测试 + 仔细的代码审查。
+  4. **扩展绑定冒烟**（pi SDK 升级后复用）：临时 tsx 先设 `LARK_APP_ID` / `LARK_APP_SECRET` 再动态 import `PiSessions`（避免 `config.ts` 顶层校验）→ `ensure` → `status`（内部走 getOrOpen + `bindExtensions`）→ 从 `(pi as any).sessions` 取实例执行 `mcp({ status: true })` 断言不含 "MCP not initialized" → `dispose` 无挂起。
 - 抽纯函数便于验证：把副作用（state/lark 调用）与决策逻辑分离（参考 `selectSyncTurns` 模式）。纯函数模块（`sync/select-turns.ts` / `sync/truncate.ts` / `utils/format.ts`）不依赖 state / lark，可独立 import 验证。
 
 ## 架构与模块
@@ -34,7 +35,7 @@
 | `src/config.ts` | env 解析（`LARK_*`）+ 业务常量（`*_LIMIT` / `*_INTERVAL_MS` / `SYNC_*`） |
 | `src/app-context.ts` | `AppContext` 类型：全局共享依赖（state / pi / api / lark / 任务容器 / agentRuns / sessionSyncWatcher） |
 | `src/types.ts` | 共享类型（`ChatBinding` / `SessionSyncState` / `AgentRun` / `CommandTask` / `BackgroundTask` / `ComputerTurn` 等） |
-| `src/pi.ts` | `PiSessions`：pi SDK 封装（按 sessionFile 串行写操作、32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / status / statusAt）；`statusFor` 状态栏；构造可注入 `backgroundTaskCountProvider` |
+| `src/pi.ts` | `PiSessions`：pi SDK 封装（按 sessionFile 串行写操作、32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / status / statusAt）；会话打开后 `bindExtensions({ mode: 'print' })` 触发扩展 session_start（SDK 纯路径不会自动发，pi-mcp-adapter 依赖它初始化 MCP，否则 mcp 工具调用返回 "MCP not initialized"），释放前（LRU 淘汰 / dispose）emit session_shutdown 停止扩展 MCP runtime 防 server 进程泄漏；`statusFor` 状态栏；构造可注入 `backgroundTaskCountProvider` |
 | `src/cards.ts` | 全部飞书卡片 schema（JSON 2.0：help / 欢迎卡 / 表单 / 选择器 / 状态卡 / `bgTaskListCard`） |
 | `src/state.ts` | `StateStore`：state.json 原子写入（tmp + rename、串行 flush）、`delete(chatId)`（群失效清理）、旧字段迁移 |
 | `src/lark-api.ts` | tenant token 缓存 + 群公告 Docx API |
@@ -126,5 +127,6 @@
 
 - **重启警告（重要）**：不要在由同一个 `lark-agent-os` 进程处理的飞书 Agent 请求中执行 `kill -TERM <lark-agent-os-pid>`——服务进入关闭流程后会中止所有正在执行的 Agent run（含当前请求），导致 `Error: This operation was aborted`。应在当前 Agent 请求完成后，从**外部终端**重启服务；如必须以编程方式触发重启，应先启动一个脱离旧服务进程组的 supervisor，再停止服务；supervisor 等待旧 PID 退出后再启动新实例。
 - 排查：关键路径日志前缀 `[agent run]` / `[command]` / `[session sync]` / `[announcement]` / `[session watch]` / `[compact]` / `[cardAction]`；状态看 `.state/state.json`；锁文件残留（进程已死）会自动清理。
+- **扩展工具面（安全知会）**：飞书会话与 pi CLI 共享用户级扩展（`~/.pi/agent/settings.json` 的 `packages`：pi-mcp-adapter / pi-web-access / pi-subagents 等），`mcp` / `web_search` / `subagent` 等扩展工具对可私聊机器人的成员（`dmMode: 'open'`）可用；`~/.pi/agent/mcp.json` 中 server 的内嵌凭据（如 figma API key）随之暴露给对话方，部署时注意 bot 可见范围与 `approveTools` 等适配器设置。
 - shutdown 流程：终止 commandTasks + backgroundTasks → 关 watcher → 停止 agent（1.5s 内发「服务正在关闭」卡）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
-- 已知边界：Windows 下进程组终止退化为单进程 kill；Windows 固定 `cmd.exe` 执行（POSIX 命令如 `ls` 不可用，需 cmd 语法；已前置 `chcp 65001` 切 UTF-8 代码页，但按 GBK 硬编码输出的老程序仍会乱码；命令内嵌引号经 node spawn Windows 转义后可能原样输出含 `\` 的引号）；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志。
+- 已知边界：Windows 下进程组终止退化为单进程 kill；Windows 固定 `cmd.exe` 执行（POSIX 命令如 `ls` 不可用，需 cmd 语法；已前置 `chcp 65001` 切 UTF-8 代码页，但按 GBK 硬编码输出的老程序仍会乱码；命令内嵌引号经 node spawn Windows 转义后可能原样输出含 `\` 的引号）；后台任务不持久化（重启不恢复）；`checker` 需客户端 V7.9+；群公告无权限时降级为日志；每会话独立 MCP runtime（与 pi CLI 一致）：server 懒连接按需 spawn 进程，LRU 上限 32 个会话可共存多份同款进程，会话淘汰 / 服务关闭时经 `session_shutdown` 清理。
