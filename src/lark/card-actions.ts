@@ -4,10 +4,12 @@ import type { CardActionEvent, CardActionResponse, NormalizedMessage, SendInput 
 import type { AppContext } from '../app-context.js';
 import { CARD_EVENT_SEEN_TTL_MS, COMMAND_CARD_OUTPUT_LIMIT, PENDING_PROMPT_MAX_MS } from '../config.js';
 import { createSeenSet } from '../utils/seen.js';
+import { createCardUpdater } from '../utils/card-update.js';
 import { takePendingPrompt } from '../utils/pending-prompt.js';
+import type { CardUpdater } from '../types.js';
 import type { PiThinkingLevel } from '../pi.js';
-import { askFormCard, bgTaskListCard, bindProjectFormCard, commandFinalCard, commandFormCard, createProjectFormCard, createSessionFormCard, modelPickerCard, renameSessionFormCard, sessionDisplayName, sessionPickerCard, syncFormCard, thinkingLevelPickerCard } from '../cards.js';
-import { commandOutputMarkdown, defaultProjectName, resolveWorkspacePath } from '../utils/format.js';
+import { askFormCard, bgTaskListCard, bindProjectFormCard, commandFinalCard, commandFormCard, compactFailureCard, compactStartingCard, compactSuccessCard, createProjectFormCard, createSessionFormCard, modelPickerCard, renameSessionFormCard, sessionDisplayName, sessionPickerCard, syncFormCard, thinkingLevelPickerCard } from '../cards.js';
+import { commandOutputMarkdown, defaultProjectName, escapeMarkdown, formatCompactResult, resolveWorkspacePath } from '../utils/format.js';
 import { assertWorkspaceDirectory } from '../utils/workspace.js';
 import { parseSyncCount, syncComputerSessions, workspaceForChat } from '../sync/sync-service.js';
 import { startShellCommand } from '../commands/shell.js';
@@ -33,6 +35,8 @@ const creatingSessions = new Set<string>();
 const syncingChats = new Set<string>();
 /** 项目群创建 in-flight 守卫（按 chatId）：后台化后建群窗口拉长，防连点重复建群 */
 const creatingGroups = new Set<string>();
+/** 压缩 in-flight 守卫（按 chatId）：fire-and-forget 后连点会重复弹卡 + 重复压缩（第二次报 Already compacted），防并发重复压缩 */
+const compactingChats = new Set<string>();
 
 /** 卡片动作分发：全部 cmd 分支 + 表单解析工具 */
 export async function handleCardAction(ctx: AppContext, event: CardActionEvent): Promise<CardActionResponse> {
@@ -291,11 +295,32 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'session.compact') {
     const sessionFile = requireActiveSession();
     if (!sessionFile) return toast('warning', selectSessionHint);
-    void ctx.pi.compact(cwd, sessionFile).catch((error) => {
-      console.error('[compact]', error);
-      const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-      void send({ markdown: `会话压缩失败：${reason}` }).catch((noticeError) => console.warn('[compact fail notice]', noticeError));
-    });
+    if (compactingChats.has(event.chatId)) return toast('warning', '正在压缩会话，请稍候。');
+    compactingChats.add(event.chatId);
+    // 压缩状态卡链路（fire-and-forget，防 3s ack 超时）：立即弹「正在压缩」卡，压缩完成后更新为成功/失败最终卡；
+    // 压缩会排队等待 session 锁（多群共享 / agent 处理中），等待期间起始卡保持「正在压缩」状态
+    void (async () => {
+      let updater: CardUpdater | undefined;
+      try {
+        const sent = await sendChat(ctx, event.chatId, { card: compactStartingCard() }, (await resolveThread()) ? { replyTo: event.messageId } : undefined);
+        updater = createCardUpdater(ctx, event.chatId, sent.messageId, 'compact status');
+        const result = await ctx.pi.compact(cwd, sessionFile);
+        await updater.finish(compactSuccessCard(formatCompactResult(result.tokensBefore, result.estimatedTokensAfter), result.status))
+          .catch((updateError) => console.warn('[compact success status]', updateError));
+      } catch (error) {
+        console.error('[compact]', error);
+        const reason = escapeMarkdown(userFacingError(error)).slice(0, 200);
+        if (updater) {
+          // 起始卡已发出：更新为失败卡（压缩失败也可能是「Already compacted」等，均视为未生效）
+          void updater.finish(compactFailureCard(reason)).catch((updateError) => console.warn('[compact fail status]', updateError));
+        } else {
+          // 起始卡都未发出（群失效 / 网络异常）：退化为直接发失败消息，保证用户有反馈
+          void send({ markdown: `会话压缩失败：${reason}` }).catch((noticeError) => console.warn('[compact fail notice]', noticeError));
+        }
+      } finally {
+        compactingChats.delete(event.chatId);
+      }
+    })();
     return toast('success', '正在压缩会话上下文。');
   }
   if (cmd === 'model.select' && typeof value.provider === 'string' && typeof value.modelId === 'string') {

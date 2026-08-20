@@ -7,7 +7,7 @@ const SESSION_TITLE_MAX_LENGTH = 48;
 const CARD_MARKDOWN_LIMIT = 6_000;
 const SESSION_PICKER_LIMIT = 10;
 /** 压缩会话的二次确认文案（help 群模式 / 话题模式共用，改文案只需改此处） */
-const COMPACT_CONFIRM = { title: '确认压缩会话？', text: '压缩将丢弃较早的对话上下文，且会中止进行中的任务，不可撤销。确定继续吗？' };
+const COMPACT_CONFIRM = { title: '确认压缩会话？', text: '压缩将丢弃较早的对话上下文并合并为摘要，不可撤销。若 Agent 正在处理，将等其完成后再压缩。确定继续吗？' };
 
 /** 危险操作按钮的二次确认弹窗（纯客户端行为，确认后照常回调；title 必填） */
 function confirmDialog(title: string, text: string): object {
@@ -144,6 +144,21 @@ export function agentRunningCard(taskId: string, prompt: string, output?: string
 export function agentFinalCard(title: string, content: string, status?: string, elapsed?: string): object {
   const titleWithElapsed = elapsed ? `${title} - 耗时：${elapsed}` : title;
   return { schema: '2.0', config: { summary: { content: titleWithElapsed } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**${titleWithElapsed}**\n\n${content}${status ? `\n\n${status}` : ''}`) }] } };
+}
+
+/** 压缩会话状态卡：点击「压缩会话」后立即弹出（fire-and-forget），压缩完成后由 compactSuccessCard / compactFailureCard 覆盖 */
+export function compactStartingCard(): object {
+  return { schema: '2.0', config: { summary: { content: '正在压缩会话' } }, body: { elements: [{ tag: 'markdown', content: '**正在压缩会话上下文**\n\n正在生成摘要并重建上下文，请稍候…' }] } };
+}
+
+/** 压缩会话成功卡：detail = 压缩前后 context 对比；status = 压缩后状态栏（可选，压缩后无新对话时 percent 为 ?） */
+export function compactSuccessCard(detail: string, status?: string): object {
+  return { schema: '2.0', config: { summary: { content: '会话压缩成功' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**会话压缩成功**\n\n${detail}${status ? `\n\n${status}` : ''}`) }] } };
+}
+
+/** 压缩会话失败卡：detail = 失败原因 */
+export function compactFailureCard(detail: string): object {
+  return { schema: '2.0', config: { summary: { content: '会话压缩失败' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**会话压缩失败**\n\n${detail}`) }] } };
 }
 
 export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode: 'group' | 'topic' = 'group'): object {

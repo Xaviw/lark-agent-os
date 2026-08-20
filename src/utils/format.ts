@@ -66,6 +66,33 @@ export function topicSessionName(date = new Date()): string {
   return `话题-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** 压缩前后 context 对比文案：170k → 59k（-65%）；无净减少时如实说明，缺数据给兜底说明 */
+export function formatCompactResult(tokensBefore: number | undefined, tokensAfter: number | undefined): string {
+  if (typeof tokensBefore === 'number' && tokensBefore > 0) {
+    const before = formatTokens(tokensBefore);
+    if (typeof tokensAfter === 'number' && tokensAfter > 0) {
+      const after = formatTokens(tokensAfter);
+      if (tokensAfter < tokensBefore) {
+        const pct = Math.round((1 - tokensAfter / tokensBefore) * 100);
+        return `上下文占用：${before} → ${after}（-${pct}%）\n\n较早的对话已摘要化。`;
+      }
+      // 压缩无净减少（保留消息 + 摘要 ≈ 原上下文）：如实说明，避免误报「已压缩」
+      return `上下文占用：${before} → ${after}（基本不变）\n\n较早的对话已摘要化。`;
+    }
+    return `上下文占用：${before}\n\n较早的对话已摘要化。`;
+  }
+  return '较早的对话已摘要化，上下文已重建。';
+}
+
+/** token 数量人性化格式化：170348 → 170k、59312 → 59k、2_345_678 → 2.3M */
+export function formatTokens(count: number): string {
+  if (count < 1_000) return String(count);
+  if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
+  if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
+  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  return `${Math.round(count / 1_000_000)}M`;
+}
+
 export function resolveWorkspacePath(input: string, baseCwd: string): string {
   const value = input.trim();
   if (!value) throw new Error('请填写工作路径。');

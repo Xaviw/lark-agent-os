@@ -10,9 +10,20 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PI_SESSION_CACHE_LIMIT } from './config.js';
 import type { PromptImage } from './types.js';
+import { formatTokens } from './utils/format.js';
 
 export type PiPromptResult = {
   answer: string;
+  status?: string;
+};
+
+/** 压缩会话的结果：压缩前后 context 对比 + 压缩后状态栏 */
+export type PiCompactResult = {
+  /** 压缩前 context tokens（usage 口径，含固定开销） */
+  tokensBefore?: number;
+  /** 压缩后估算 context tokens（SDK 可能不提供；压缩后需新对话才有精确 usage） */
+  estimatedTokensAfter?: number;
+  /** 压缩后的状态栏（含上下文占用；压缩后无新对话时 percent 显示 ?） */
   status?: string;
 };
 
@@ -236,9 +247,14 @@ export class PiSessions {
     }));
   }
 
-  async compact(cwd: string, sessionFile: string): Promise<void> {
+  async compact(cwd: string, sessionFile: string): Promise<PiCompactResult> {
     return this.withSessionLock(sessionFile, () => this.usingSession(cwd, sessionFile, async (session) => {
-      await session.compact();
+      const result = await session.compact();
+      return {
+        tokensBefore: result.tokensBefore,
+        estimatedTokensAfter: result.estimatedTokensAfter,
+        status: this.statusFor(session, this.backgroundTaskCountProvider()),
+      };
     }));
   }
 
@@ -281,10 +297,10 @@ export class PiSessions {
       : undefined;
     const promptTokens = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
     const parts: string[] = [];
-    if (stats.tokens.input) parts.push(`↑${formatPiTokens(stats.tokens.input)}`);
-    if (stats.tokens.output) parts.push(`↓${formatPiTokens(stats.tokens.output)}`);
-    if (stats.tokens.cacheRead) parts.push(`R${formatPiTokens(stats.tokens.cacheRead)}`);
-    if (stats.tokens.cacheWrite) parts.push(`W${formatPiTokens(stats.tokens.cacheWrite)}`);
+    if (stats.tokens.input) parts.push(`↑${formatTokens(stats.tokens.input)}`);
+    if (stats.tokens.output) parts.push(`↓${formatTokens(stats.tokens.output)}`);
+    if (stats.tokens.cacheRead) parts.push(`R${formatTokens(stats.tokens.cacheRead)}`);
+    if (stats.tokens.cacheWrite) parts.push(`W${formatTokens(stats.tokens.cacheWrite)}`);
     if (promptTokens > 0 && (stats.tokens.cacheRead > 0 || stats.tokens.cacheWrite > 0)) {
       parts.push(`CH${((usage!.cacheRead / promptTokens) * 100).toFixed(1)}%`);
     }
@@ -292,7 +308,7 @@ export class PiSessions {
     const context = stats.contextUsage;
     const contextWindow = context?.contextWindow ?? 0;
     const percent = context?.percent === null ? '?' : (context?.percent ?? 0).toFixed(1);
-    parts.push(`${percent}%/${formatPiTokens(contextWindow)}${session.autoCompactionEnabled ? ' (auto)' : ''}`);
+    parts.push(`${percent}%/${formatTokens(contextWindow)}${session.autoCompactionEnabled ? ' (auto)' : ''}`);
     if (backgroundCount > 0) parts.push(`后台任务 ×${backgroundCount}`);
     return parts.join(' ');
   }
@@ -436,12 +452,4 @@ export class PiSessions {
     this.opening.clear();
     this.runningPrompt.clear();
   }
-}
-
-function formatPiTokens(count: number): string {
-  if (count < 1_000) return String(count);
-  if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
-  if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
-  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  return `${Math.round(count / 1_000_000)}M`;
 }
