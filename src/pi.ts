@@ -1,11 +1,15 @@
 import {
   createAgentSession,
+  DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
+  SettingsManager,
+  getAgentDir,
   type AgentSession,
   type SessionInfo,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -51,6 +55,49 @@ type PiPromptOptions = {
   messageId?: string;
 };
 
+/** 目录存在则返回 [dir]，否则 []：只注入真实存在的 lark-agent-os/.pi 子目录 */
+function existingDir(dir: string): string[] {
+  return existsSync(dir) ? [dir] : [];
+}
+
+/**
+ * 扫描 .pi/extensions 下的扩展条目（对齐 SDK discoverExtensionsInDir 规则）：
+ * 直接 .ts/.js 文件，或子目录的 package.json pi.extensions 声明 / index.ts|js 入口（单层，不递归）。
+ * additionalExtensionPaths 按「单个扩展模块」加载（不扫描目录），故须自行收集条目文件。
+ */
+function collectExtensionsInDir(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const entries: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const full = join(dir, entry.name);
+    if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.js'))) {
+      entries.push(full);
+      continue;
+    }
+    if (!entry.isDirectory()) continue;
+    // 子目录：优先 package.json 的 pi.extensions 声明
+    let declared = false;
+    try {
+      const manifest = JSON.parse(readFileSync(join(full, 'package.json'), 'utf8'));
+      if (Array.isArray(manifest?.pi?.extensions)) {
+        for (const rel of manifest.pi.extensions) {
+          const resolved = join(full, rel);
+          if (existsSync(resolved)) entries.push(resolved);
+        }
+        declared = true;
+      }
+    } catch {
+      // 无 package.json 或解析失败，回退到 index 入口检查
+    }
+    if (!declared) {
+      if (existsSync(join(full, 'index.ts'))) entries.push(join(full, 'index.ts'));
+      else if (existsSync(join(full, 'index.js'))) entries.push(join(full, 'index.js'));
+    }
+  }
+  return entries;
+}
+
 function latestAssistantError(session: AgentSession, beforeMessageIds: ReadonlySet<string>): string | undefined {
   const entry = [...session.sessionManager.getEntries()]
     .reverse()
@@ -89,9 +136,17 @@ export class PiSessions {
   private disposed = false;
   private readonly modelRuntimePromise = ModelRuntime.create();
   private readonly backgroundTaskCountProvider: () => number;
+  /**
+   * lark-agent-os 项目自身 .pi 目录（默认进程 cwd，即服务启动目录下的 .pi）。
+   * 独立于群绑定工作区：无论群绑定到哪个 cwd，都注入这里的 extensions/skills/prompts。
+   * 注入目录在每次会话打开时（getOrOpen）重新扫描：运行中新增的 skill/prompt/扩展文件，
+   * 新开或重开会话即生效；themes 在飞书无实际作用，不注入。
+   */
+  private readonly projectPiRoot: string;
 
-  constructor(backgroundTaskCountProvider?: () => number) {
+  constructor(backgroundTaskCountProvider?: () => number, projectRoot = process.cwd()) {
     this.backgroundTaskCountProvider = backgroundTaskCountProvider ?? (() => 0);
+    this.projectPiRoot = join(projectRoot, '.pi');
   }
 
   /** 组装点注入 send_image 执行器（channel 创建完成后调用；未注入则 Agent 侧无此工具） */
@@ -319,6 +374,7 @@ export class PiSessions {
     const snapshot = join(directory, 'session.jsonl');
     const entries = [source.getHeader(), ...branch.slice(0, target + 1)];
     await writeFile(snapshot, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`, { mode: 0o600 });
+    // 快照会话仅用于 statusAt 状态栏，不注入 lark .pi 资源（无需扩展/skill）
     const { session } = await createAgentSession({
       cwd,
       modelRuntime: await this.modelRuntimePromise,
@@ -378,6 +434,7 @@ export class PiSessions {
   }
 
   private async initialize(cwd: string, sessionManager: SessionManager): Promise<void> {
+    // 临时初始化会话（仅落盘初始 JSONL 后释放），不注入 lark .pi 资源
     const { session } = await createAgentSession({
       cwd,
       modelRuntime: await this.modelRuntimePromise,
@@ -433,10 +490,30 @@ export class PiSessions {
         customToolsList.push(buildScreenshotTool({ screenshot: () => this.screenshot }));
       }
       const customTools = customToolsList.length > 0 ? customToolsList : undefined;
+      // 用同一个 settingsManager 装配 DefaultResourceLoader，额外注入 lark-agent-os/.pi 的资源：
+      // additionalExtensionPaths/additionalSkillPaths/additionalPromptTemplatePaths 为官方注入通道，
+      // 不随 cwd、不受项目 trust 门控（等价 CLI 显式指定：.pi 下内容不经过信任校验，须保证可信）；
+      // 传 resourceLoader 后 createAgentSession 不会自动 reload，须先手动 reload。
+      // 注入路径在每次打开会话时重新扫描（extensions 按文件、skills/prompts 按目录），运行中新增文件对新会话生效；
+      // 每次 getOrOpen 重建 DefaultResourceLoader + reload，成本与改造前 SDK 内部行为一致。
+      const agentDir = getAgentDir();
+      const settingsManager = SettingsManager.create(cwd, agentDir);
+      const resourceLoader = new DefaultResourceLoader({
+        cwd,
+        agentDir,
+        settingsManager,
+        additionalExtensionPaths: collectExtensionsInDir(join(this.projectPiRoot, 'extensions')),
+        additionalSkillPaths: existingDir(join(this.projectPiRoot, 'skills')),
+        additionalPromptTemplatePaths: existingDir(join(this.projectPiRoot, 'prompts')),
+      });
+      await resourceLoader.reload();
       const { session } = await createAgentSession({
         cwd,
+        agentDir,
         modelRuntime: await this.modelRuntimePromise,
         sessionManager: SessionManager.open(sessionFile, undefined, cwd),
+        settingsManager,
+        resourceLoader,
         ...(customTools ? { customTools } : {}),
       });
       await this.bindSessionExtensions(session);

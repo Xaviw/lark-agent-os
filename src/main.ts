@@ -27,7 +27,8 @@ const backgroundTasks = new Map<string, BackgroundTask>();
 const commandTasks = new Map<string, CommandTask>();
 /** 后台 fire-and-forget 任务容器（同步 / 建群等）：shutdown 等待收尾 */
 const pendingBackground = new Set<Promise<unknown>>();
-const pi = new PiSessions(() => backgroundTasks.size);
+// lark .pi 注入根 = 服务进程 cwd（lark-agent-os 项目根，独立于群绑定工作区）；显式传入使职责落在组装点
+const pi = new PiSessions(() => backgroundTasks.size, process.cwd());
 const api = new LarkApi(appId, appSecret);
 
 const channel = createLarkChannel({
