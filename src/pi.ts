@@ -4,12 +4,14 @@ import {
   SessionManager,
   type AgentSession,
   type SessionInfo,
+  type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PI_SESSION_CACHE_LIMIT } from './config.js';
 import { buildSendImageTool, type SendImageExecutor } from './agent/send-image.js';
+import { buildScreenshotTool, type ScreenshotExecutor } from './agent/screenshot.js';
 import type { PromptImage } from './types.js';
 import { formatTokens } from './utils/format.js';
 
@@ -81,6 +83,8 @@ export class PiSessions {
   private readonly activeRunBySessionFile = new Map<string, { chatId: string; messageId: string }>();
   /** send_image 工具执行器（组装点注入，持有 LarkChannel）；未注入时工具不可用 */
   private sendImage?: SendImageExecutor;
+  /** screenshot 工具执行器（组装点注入）；未注入时工具不可用 */
+  private screenshot?: ScreenshotExecutor;
   /** dispose 后拒绝新打开并释放迟到的创建结果 */
   private disposed = false;
   private readonly modelRuntimePromise = ModelRuntime.create();
@@ -93,6 +97,11 @@ export class PiSessions {
   /** 组装点注入 send_image 执行器（channel 创建完成后调用；未注入则 Agent 侧无此工具） */
   setSendImage(executor: SendImageExecutor): void {
     this.sendImage = executor;
+  }
+
+  /** 组装点注入 screenshot 执行器（未注入则 Agent 侧无此工具） */
+  setScreenshot(executor: ScreenshotExecutor): void {
+    this.screenshot = executor;
   }
 
   /** send_image 工具反查：当前活跃 run 的发送目标（无活跃 run 返回 undefined） */
@@ -411,15 +420,19 @@ export class PiSessions {
     const pending = this.opening.get(sessionFile);
     if (pending) return pending;
     const created = (async () => {
-      // send_image 工具：仅注入已装配执行器的实例；闭包捕获 sessionFile / cwd，反查活跃 run 决定发送目标；
-      // sendImage 惰性取值（而非创建时快照）：组装点注入顺序变化时仍能拿到执行器
-      const customTools = this.sendImage
-        ? [buildSendImageTool({
-            resolveActiveRun: () => this.activeRunForSession(sessionFile),
-            sendImage: () => this.sendImage,
-            cwd,
-          })]
-        : undefined;
+      // 自定义工具：仅注入已装配执行器的实例；执行器均惰性取值（而非创建时快照）：组装点注入顺序变化时仍能拿到
+      const customToolsList: ToolDefinition[] = [];
+      if (this.sendImage) {
+        customToolsList.push(buildSendImageTool({
+          resolveActiveRun: () => this.activeRunForSession(sessionFile),
+          sendImage: () => this.sendImage,
+          cwd,
+        }));
+      }
+      if (this.screenshot) {
+        customToolsList.push(buildScreenshotTool({ screenshot: () => this.screenshot }));
+      }
+      const customTools = customToolsList.length > 0 ? customToolsList : undefined;
       const { session } = await createAgentSession({
         cwd,
         modelRuntime: await this.modelRuntimePromise,

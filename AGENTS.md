@@ -42,6 +42,8 @@
 | `src/agent/run-manager.ts` | `AgentRunManager`：每群队列 + 状态机（queued → running → succeeded / failed / cancelled，含 stopping 过渡）；`cancelChat(chatId)`（群失效清理：复用 stop 语义） |
 | `src/agent/prompt.ts` | `runPrompt` / `promptWithReplyContext` / `useNewSession`（引用消息上下文、飞书来源标记） |
 | `src/agent/ask.ts` | 快速提问（一次性无上下文 agent 问答）：编排（懒创建独立 session → agent 队列 prompt → 卡链直接呈现回复，无提示词注入 / 无解析 / 无命令转交） |
+| `src/agent/send-image.ts` | `send_image` 工具（Agent 发独立图片消息）：`resolveImageTarget` / `isSensitiveLocalPath`（纯函数）+ `createSendImageExecutor`（本地文件 / URL → 字节 → channel.send）+ `buildSendImageTool` |
+| `src/agent/screenshot.ts` | `screenshot` 工具（Windows 屏幕截图）：内嵌 PowerShell 脚本（DPI-Aware + PrintWindow + 最小化移屏外技巧 + 空白检测），纯函数 `parseScreenshotOutput` / `screenshotErrorText` / `describeMonitors` + 执行器（spawn powershell、screenshotRoot 清理）+ `buildScreenshotTool` |
 | `src/commands/shell.ts` | 命令执行（平台感知 shell：Windows `cmd.exe /d /s /c`、POSIX `$SHELL -lc`、超时、常驻任务、`terminateProcessGroup`；`decodeCommandLine` 逐行双解码（UTF-8 + GBK 兜底，纯函数，仅 Windows）/ `createOutputDecoder` 流式解码器（平台路由 + 无换行超长输出缓冲上限保护）） |
 | `src/sync/session-entries.ts` | session JSONL 解析（轮次划分 / 可发布判断 / 可重试错误）+ `sessionBranchEntries` / `extractText`（纯函数） |
 | `src/sync/select-turns.ts` | `selectSyncTurns`：方案 B 轮次选择（纯函数） |

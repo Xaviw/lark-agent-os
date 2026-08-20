@@ -70,11 +70,24 @@
 
 - Agent 在对话过程中可调用 `send_image` 工具，把一张图片作为**独立图片消息**发送到当前飞书对话（可放大 / 保存 / 转发），并继续用文字说明图片内容。
 - **注册**：`AgentSessionConfig.customTools`（SDK 层、进程内，按 session 闭包捕获 sessionFile / cwd）；主会话 / 话题会话 / 快速提问会话统一注册。工具不写 session JSONL（图片消息不进入对话上下文、不参与电脑端同步），也不渗透到电脑端独立启动的 pi agent（电脑端无此工具）。
-- **参数**：`target` = 本地图片文件路径（绝对或相对工作目录，**不限制路径范围**，但拒绝敏感文件）或 http(s) 图片 URL；单张 ≤10MB（`SEND_IMAGE_MAX_BYTES`，对齐飞书上传图片接口上限），URL 下载超时 15s（`SEND_IMAGE_DOWNLOAD_TIMEOUT_MS`）。
+- **参数**：`target` = 本地图片文件路径（**绝对路径**，或**相对 Agent 命令工作目录**（与 bash 等命令工具所在目录一致）的相对路径；**不限制路径范围**，但拒绝敏感文件）或 http(s) 图片 URL；截图 / 下载等工具返回的本地路径可直接传入。单张 ≤10MB（`SEND_IMAGE_MAX_BYTES`，对齐飞书上传图片接口上限），URL 下载超时 15s（`SEND_IMAGE_DOWNLOAD_TIMEOUT_MS`）。
 - **敏感文件拒绝**：本地路径命中黑名单（`.env` 系列、`*.pem` / `*.key` / `*.p12` / `*.pfx`、SSH 私钥名 `id_rsa` 等、任意位置 `.ssh` 目录）时拒绝发送（`isSensitiveLocalPath` 纯函数），缓解 prompt injection 诱导 Agent 外泄凭据的风险；正常图片产物不受影响。
 - **发送目标反查**：pi 按 sessionFile 记录当前活跃 run 的 `chatId` + 状态卡 `messageId`（per-session 串行锁保证同一时刻每 sessionFile 至多一个活跃 run，多群共享 session 时也唯一）；图片消息 `replyTo` 状态卡（话题内状态卡在话题窗口 → 图片保持在话题窗口内）。
 - **发送链路**：读本地文件 / 下载 URL → Buffer → `channel.send(chatId, { image: { source: Buffer } }, { replyTo })`。Buffer source 不触发 `outbound.allowedFileDirs` 限制；channel 内部上传 `im/v1/images` 后发独立 `image` 消息。
 - **失败兜底**：文件不存在 / 路径非文件 / 大小超限 / 下载失败 / 上传失败 / 无活跃 run → 工具结果返回错误文本给 Agent（Agent 在回复中说明），不阻塞本次 prompt。
+
+**Agent 屏幕截图（screenshot）**
+
+- Agent 可调用 `screenshot` 工具截取本机 Windows 系统屏幕，保存为 PNG 文件并返回本地路径；Agent 用 `send_image` 把截图发给用户（或先自行读取分析）。
+- **注册**：`AgentSessionConfig.customTools`（与 send_image 同模式，进程内注入、执行器惰性取值）；主会话 / 话题会话 / 快速提问会话统一注册，工具不写 session JSONL、不渗透电脑端独立启动的 pi agent。
+- **target 语义**：`primary`=主显示器；`all`=每台显示器各一张（推荐，文件小）；`display:N`=第 N 台（从 1 起，缺省 1，可先 `all` 查列表）；`full`=整块虚拟桌面拼接（多显示器 + 高 DPI 时文件可能很大）；`window`=指定窗口（`windowTitle` 标题关键字模糊匹配 或 `pid` 进程号，两者都不给截前台窗口）。
+- **窗口级截图**：`PrintWindow` + `PW_RENDERFULLCONTENT`（可截被遮挡窗口）；**最小化窗口**自动执行「还原 → 移屏外(-32000,-32000) → PrintWindow → 再最小化」技巧（本机实测可截 Windows 11 新版记事本这类 WinUI 应用；少数 UWP / 硬件加速窗口可能失败 → `window-capture-failed`）。
+- **DPI**：PowerShell 脚本内 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，高 DPI（如 200% 缩放）下按物理像素截图（本机实测主屏 2880×1800 物理），避免 GDI 虚拟化导致模糊。
+- **不可用场景明确报错**（`screenshotErrorText` 中文映射）：`no-interactive-session`（服务 / Session 0 无法截用户桌面）、`window-not-found`（附当前可见窗口列表）、`display-not-found`（附显示器列表）、`window-capture-failed`、`capture-failed`、`write-failed`、`unsupported-platform`（非 Windows）、`timeout`、`exec-failed`、`parse-failed`、`bad-target`。
+- **空白检测**：截图后采样唯一颜色数 + 平均亮度，全黑 / 纯色标记 `blank` 并警告（显示器关闭 / 锁屏 / 无法离屏渲染的启发式提示；物理关屏通常得到陈旧帧或黑屏，无可靠探测 API）。
+- **产物与清理**：PNG 写入 `<LARK_STATE_DIR>/screenshots`，保留最近 `SCREENSHOT_KEEP_COUNT`（50）张、超出按 mtime 清理（`pruneScreenshots`）；执行超时 `SCREENSHOT_TIMEOUT_MS`（30s）。
+- **实现**：内嵌 PowerShell 脚本（ASCII-only，参数经 UTF-8 JSON 文件传递规避命令行编码问题，ps1 写临时目录带 UTF-8 BOM），spawn `powershell.exe` 执行，解析单行 JSON 结果标记（`parseScreenshotOutput` 纯函数）。
+- **失败兜底**：任何错误转为工具结果文本返回给 Agent，不阻塞本次 prompt。
 
 **话题窗口（thread）**
 
@@ -299,4 +312,5 @@ lark-agent-os（单进程 + 实例锁）
 10. `checker` 组件需飞书客户端 V7.9+（低版本显示占位）。
 11. 每会话独立 MCP runtime（与 pi CLI 一致）：server 懒连接按需 spawn 进程，LRU 上限 32 个会话可共存多份同款进程，会话淘汰 / 服务关闭时经 `session_shutdown` 清理。
 12. `send_image` 工具的 URL 来源仅限 http(s)，下载不设 SSRF 过滤（信任 Agent，仅限协议 + 大小 / 超时）；本地路径不限制工作目录，但拒绝敏感文件（`.env` / 私钥 / 证书 / `.ssh` 目录，见 2.1「Agent 发送图片」），降低 prompt injection 外泄凭据风险。
-12. 扩展工具面：`mcp` / `web_search` / `subagent` 等扩展工具对可私聊机器人的成员（`dmMode: 'open'`）可用，`~/.pi/agent/mcp.json` 中 server 的内嵌凭据（如 figma API key）随之暴露给对话方；如需限制可配置适配器 `approveTools` 或收紧 bot 可见范围。
+13. 扩展工具面：`mcp` / `web_search` / `subagent` 等扩展工具对可私聊机器人的成员（`dmMode: 'open'`）可用，`~/.pi/agent/mcp.json` 中 server 的内嵌凭据（如 figma API key）随之暴露给对话方；如需限制可配置适配器 `approveTools` 或收紧 bot 可见范围。
+14. `screenshot` 工具把整块屏幕（含所有应用窗口内容）暴露给对话方：对 `dmMode: 'open'` 的私聊成员可用，存在屏幕内容泄露风险，部署时注意 bot 可见范围 / 权限。截图依赖「活跃图形会话 + 可用显示器」：服务会话（Session 0）无法截图、显示器物理关闭 / 锁屏时内容陈旧或黑屏（详见 2.1「Agent 屏幕截图」）。

@@ -65,3 +65,11 @@ export const ATTACHMENT_MESSAGE_TYPES = new Set(['image', 'file', 'audio', 'vide
 export const SEND_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 /** URL 图片来源下载超时（本地路径无此约束） */
 export const SEND_IMAGE_DOWNLOAD_TIMEOUT_MS = 15_000;
+
+// ── Agent 屏幕截图（screenshot 工具，仅 Windows）──
+/** 截图文件输出目录（.state/screenshots） */
+export const screenshotRoot = join(stateRoot, 'screenshots');
+/** 截图脚本执行超时：目标窗口无响应 / 系统负载过高时防止挂起 */
+export const SCREENSHOT_TIMEOUT_MS = 30_000;
+/** 截图目录保留的最大张数：超出按 mtime 清理最旧文件（防止长期运行磁盘膨胀） */
+export const SCREENSHOT_KEEP_COUNT = 50;
