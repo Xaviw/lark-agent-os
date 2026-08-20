@@ -258,6 +258,19 @@ export class PiSessions {
     }));
   }
 
+  /** 重新加载 keybindings / 扩展 / skills / prompts / themes / context 文件（对应 pi 的 /reload 命令）。
+   *  SDK 的 session.reload() 会重读 settings、重置 API providers、重载资源并重建扩展 runtime，但内部仅在存在
+   *  uiContext / shutdownHandler / onError 等 bindings 时才自动重发 session_start；本项目只 bindExtensions({ mode: 'print' })，
+   *  这些字段未设置 → reload 后扩展 runtime 不会自动重启，MCP 等扩展依赖 session_start 初始化，故须在此显式重新绑定。
+   *  返回 reload 后的状态栏（含上下文占用）。 */
+  async reload(cwd: string, sessionFile: string): Promise<string | undefined> {
+    return this.withSessionLock(sessionFile, () => this.usingSession(cwd, sessionFile, async (session) => {
+      await session.reload();
+      await this.bindSessionExtensions(session);
+      return this.statusFor(session, this.backgroundTaskCountProvider());
+    }));
+  }
+
   async status(cwd: string, sessionFile: string): Promise<string | undefined> {
     if (!piStatusEnabled) return undefined;
     return this.usingSession(cwd, sessionFile, (session) => this.statusFor(session, this.backgroundTaskCountProvider()));

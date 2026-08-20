@@ -8,7 +8,7 @@ import { createCardUpdater } from '../utils/card-update.js';
 import { takePendingPrompt } from '../utils/pending-prompt.js';
 import type { CardUpdater } from '../types.js';
 import type { PiThinkingLevel } from '../pi.js';
-import { askFormCard, bgTaskListCard, bindProjectFormCard, commandFinalCard, commandFormCard, compactFailureCard, compactStartingCard, compactSuccessCard, createProjectFormCard, createSessionFormCard, modelPickerCard, renameSessionFormCard, sessionDisplayName, sessionPickerCard, syncFormCard, thinkingLevelPickerCard } from '../cards.js';
+import { askFormCard, bgTaskListCard, bindProjectFormCard, commandFinalCard, commandFormCard, compactFailureCard, compactStartingCard, compactSuccessCard, createProjectFormCard, createSessionFormCard, modelPickerCard, reloadFailureCard, reloadStartingCard, reloadSuccessCard, renameSessionFormCard, sessionDisplayName, sessionPickerCard, syncFormCard, thinkingLevelPickerCard } from '../cards.js';
 import { commandOutputMarkdown, defaultProjectName, escapeMarkdown, formatCompactResult, resolveWorkspacePath } from '../utils/format.js';
 import { assertWorkspaceDirectory } from '../utils/workspace.js';
 import { parseSyncCount, syncComputerSessions, workspaceForChat } from '../sync/sync-service.js';
@@ -37,6 +37,8 @@ const syncingChats = new Set<string>();
 const creatingGroups = new Set<string>();
 /** 压缩 in-flight 守卫（按 chatId）：fire-and-forget 后连点会重复弹卡 + 重复压缩（第二次报 Already compacted），防并发重复压缩 */
 const compactingChats = new Set<string>();
+/** 重新加载 in-flight 守卫（按 chatId）：fire-and-forget 后连点会重复弹卡 + 重复 reload（重建扩展 runtime 有成本），防并发重复重载 */
+const reloadingChats = new Set<string>();
 
 /** 卡片动作分发：全部 cmd 分支 + 表单解析工具 */
 export async function handleCardAction(ctx: AppContext, event: CardActionEvent): Promise<CardActionResponse> {
@@ -295,33 +297,40 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
   if (cmd === 'session.compact') {
     const sessionFile = requireActiveSession();
     if (!sessionFile) return toast('warning', selectSessionHint);
-    if (compactingChats.has(event.chatId)) return toast('warning', '正在压缩会话，请稍候。');
-    compactingChats.add(event.chatId);
-    // 压缩状态卡链路（fire-and-forget，防 3s ack 超时）：立即弹「正在压缩」卡，压缩完成后更新为成功/失败最终卡；
-    // 压缩会排队等待 session 锁（多群共享 / agent 处理中），等待期间起始卡保持「正在压缩」状态
-    void (async () => {
-      let updater: CardUpdater | undefined;
-      try {
-        const sent = await sendChat(ctx, event.chatId, { card: compactStartingCard() }, (await resolveThread()) ? { replyTo: event.messageId } : undefined);
-        updater = createCardUpdater(ctx, event.chatId, sent.messageId, 'compact status');
-        const result = await ctx.pi.compact(cwd, sessionFile);
-        await updater.finish(compactSuccessCard(formatCompactResult(result.tokensBefore, result.estimatedTokensAfter), result.status))
-          .catch((updateError) => console.warn('[compact success status]', updateError));
-      } catch (error) {
-        console.error('[compact]', error);
-        const reason = escapeMarkdown(userFacingError(error)).slice(0, 200);
-        if (updater) {
-          // 起始卡已发出：更新为失败卡（压缩失败也可能是「Already compacted」等，均视为未生效）
-          void updater.finish(compactFailureCard(reason)).catch((updateError) => console.warn('[compact fail status]', updateError));
-        } else {
-          // 起始卡都未发出（群失效 / 网络异常）：退化为直接发失败消息，保证用户有反馈
-          void send({ markdown: `会话压缩失败：${reason}` }).catch((noticeError) => console.warn('[compact fail notice]', noticeError));
-        }
-      } finally {
-        compactingChats.delete(event.chatId);
-      }
-    })();
+    const tid = await resolveThread();
+    // 状态卡链路见 runStatusCardOp（fire-and-forget，防 3s ack 超时）；压缩会排队等待 session 锁（多群共享 / agent 处理中）
+    if (!runStatusCardOp(ctx, {
+      chatId: event.chatId,
+      guard: compactingChats,
+      startingCard: compactStartingCard(),
+      tag: 'compact status',
+      replyTo: tid ? event.messageId : undefined,
+      op: () => ctx.pi.compact(cwd, sessionFile),
+      successCard: (result) => compactSuccessCard(formatCompactResult(result.tokensBefore, result.estimatedTokensAfter), result.status),
+      failureCard: (reason) => compactFailureCard(reason),
+      logLabel: 'compact',
+      failPrefix: '会话压缩失败：',
+    })) return toast('warning', '正在压缩会话，请稍候。');
     return toast('success', '正在压缩会话上下文。');
+  }
+  if (cmd === 'config.reload') {
+    const sessionFile = requireActiveSession();
+    if (!sessionFile) return toast('warning', selectSessionHint);
+    const tid = await resolveThread();
+    // 状态卡链路见 runStatusCardOp；reload 会重建扩展 runtime（MCP 等扩展重启初始化），与 compact 同受 session 锁串行
+    if (!runStatusCardOp(ctx, {
+      chatId: event.chatId,
+      guard: reloadingChats,
+      startingCard: reloadStartingCard(),
+      tag: 'reload status',
+      replyTo: tid ? event.messageId : undefined,
+      op: () => ctx.pi.reload(cwd, sessionFile),
+      successCard: (status) => reloadSuccessCard(status),
+      failureCard: (reason) => reloadFailureCard(reason),
+      logLabel: 'reload',
+      failPrefix: '重新加载失败：',
+    })) return toast('warning', '正在重新加载，请稍候。');
+    return toast('success', '正在重新加载配置。');
   }
   if (cmd === 'model.select' && typeof value.provider === 'string' && typeof value.modelId === 'string') {
     const sessionFile = requireActiveSession();
@@ -410,6 +419,63 @@ export async function handleCardAction(ctx: AppContext, event: CardActionEvent):
  * 后台发送卡片：卡片回调需 3s 内 ack（SDK 等 handler 返回才发 ack），网络慢时同步 await 发送会触发
  * 平台重推与客户端「目标回调服务未响应」；先回 toast、后台异步发送（失败补发消息），卡片显示由发送完成自然呈现。
  */
+type StatusCardOpOptions<T> = {
+  chatId: string;
+  /** in-flight 守卫（按 chatId）：操作进行中再次触发时返回 false，由调用方 toast busy */
+  guard: Set<string>;
+  /** 立即弹出的起始卡 */
+  startingCard: object;
+  /** createCardUpdater 标签 */
+  tag: string;
+  /** 话题上下文回复到触发卡 */
+  replyTo?: string;
+  /** 实际操作（通常串行于 session 锁内，等待期间起始卡保持进行中状态） */
+  op: () => Promise<T>;
+  /** 成功最终卡（可携带 op 结果，如压缩前后对比 / reload 后状态栏） */
+  successCard: (result: T) => object;
+  /** 失败最终卡 */
+  failureCard: (reason: string) => object;
+  /** 日志前缀（'compact' / 'reload' 等） */
+  logLabel: string;
+  /** 起始卡未发出时的降级失败消息前缀 */
+  failPrefix: string;
+};
+
+/**
+ * 运行「状态卡链路」的 fire-and-forget 异步操作（防 3s ack 超时）：立即弹 starting 卡 → 执行 op →
+ * finish 更新为 success 卡；失败更新为 failure 卡；起始卡都未发出（群失效 / 网络异常）时退化为直接发失败消息。
+ * 操作进行中（guard 已含 chatId）返回 false，调用方返回 busy toast；成功启动返回 true。
+ * 调用方须在调用前 resolveThread 并传入 replyTo（与发送侧惰性反查语义一致）。
+ */
+function runStatusCardOp<T>(ctx: AppContext, opts: StatusCardOpOptions<T>): boolean {
+  if (opts.guard.has(opts.chatId)) return false;
+  opts.guard.add(opts.chatId);
+  void (async () => {
+    let updater: CardUpdater | undefined;
+    try {
+      const sent = await sendChat(ctx, opts.chatId, { card: opts.startingCard }, opts.replyTo ? { replyTo: opts.replyTo } : undefined);
+      updater = createCardUpdater(ctx, opts.chatId, sent.messageId, opts.tag);
+      const result = await opts.op();
+      await updater.finish(opts.successCard(result))
+        .catch((updateError) => console.warn(`[${opts.logLabel} success status]`, updateError));
+    } catch (error) {
+      console.error(`[${opts.logLabel}]`, error);
+      const reason = escapeMarkdown(userFacingError(error)).slice(0, 200);
+      if (updater) {
+        // 起始卡已发出：更新为失败卡（失败可能只是「Already compacted」等，均视为未生效）
+        void updater.finish(opts.failureCard(reason)).catch((updateError) => console.warn(`[${opts.logLabel} fail status]`, updateError));
+      } else {
+        // 起始卡都未发出（群失效 / 网络异常）：退化为直接发失败消息，保证用户有反馈
+        void sendChat(ctx, opts.chatId, { markdown: `${opts.failPrefix}${reason}` }, opts.replyTo ? { replyTo: opts.replyTo } : undefined)
+          .catch((noticeError) => console.warn(`[${opts.logLabel} fail notice]`, noticeError));
+      }
+    } finally {
+      opts.guard.delete(opts.chatId);
+    }
+  })();
+  return true;
+}
+
 function fireSendCard(send: (input: SendInput) => Promise<void>, card: object, failLabel: string): void {
   void send({ card }).catch((error) => {
     console.error(`[card send] ${failLabel}`, error);

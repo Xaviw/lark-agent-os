@@ -44,7 +44,7 @@
 | 组 | 按钮（显示文本 / cmd） |
 | --- | --- |
 | 1 | 切换模型 `model.form` · 切换思考强度 `thinkingLevel.form` · 重命名会话 `session.rename.form` |
-| 2 | 新建会话 `session.new.form` · 压缩会话 `session.compact` · 切换会话 `session.resume.form` · 同步消息 `session.sync.form` |
+| 2 | 新建会话 `session.new.form` · 压缩会话 `session.compact` · 切换会话 `session.resume.form` · 同步消息 `session.sync.form` · 重新加载 `config.reload` |
 | 3 | 执行命令 `command.form` · 快速提问 `quickAsk.form` · 创建项目群 `project.create.form` · 绑定项目 `project.bind.form` · 后台任务 `bgTask.form` |
 
 - 提示语：未绑定群 →"此群尚未绑定项目，请先绑定。"；已绑定未选会话 →"请使用"新建会话"或"切换会话"。"（话题模式不显示绑定 / Session 提示，按钮裁剪见「话题窗口（thread）」）
@@ -71,7 +71,7 @@
 - 飞书「创建话题」后，话题窗口中的消息事件与原会话共享 `chat_id`、额外带 `thread_id`；话题窗口不是独立 chat，但对话归属**独立 session**（不 fork、不继承主会话历史）。
 - **懒初始化**：话题内首次 `@bot`（群）/ 任意消息（私聊）时自动新建 session（命名 `话题-MM-DD HH:mm`，电脑端 pi 列表可见）并绑定 `threadId`；之后话题内对话持续写入该 session，与主会话完全隔离（不写入主会话、不依赖主会话已选 Session）。同一 threadId 并发首条消息只创建一次（in-flight 守卫 + 双检）；多个话题各自独立 session；不同群可存在相同 threadId（按 chatId 隔离）。
 - 触发规则沿用原会话：群话题内须 `@bot`（`/help` 免 `@`）；私聊话题免 `@`。话题内 `@bot` 而群未绑定项目 → 仍提示先绑定。
-- **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 命令 / 快速提问 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩）作用于**话题 session** 而非主会话。
+- **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 重新加载 / 命令 / 快速提问 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩、重新加载）作用于**话题 session** 而非主会话。
 - **公告**：话题内不触发群公告（懒初始化建会话、切换模型、设置思考强度、重命名均跳过公告刷新）；话题不会产生独立公告。
 - **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 切换 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 仅主会话挂起消息使用（key = `chatId`）。
 - **不同步**：话题 session 不参与电脑端 → 飞书同步（watcher 只监听主会话 activeSessionFile）；同步游标 / 防回环 / inFlight 均不涉及话题 session（`markFeishuOriginEntries` 按主会话 activeSessionFile 匹配，话题轮次不标记、不累积；进程异常退出后 reconcile 清理话题 inFlight 仅清不标）。话题窗口内对话由飞书 → 电脑端方向直接写入共享 JSONL，电脑端 resume 可见。
@@ -84,6 +84,8 @@
 - **重命名**：名称必填，换行折叠为空格；写入 session 文件并更新公告。
 - **压缩**：`session.compact()` 异步执行（每群 in-flight 守卫防连点重复压缩）；**不刷新群公告**；点击后立即弹「正在压缩」状态卡（fire-and-forget，防 3s ack 超时；压缩排队等待 session 锁期间保持该状态，若 Agent 正在处理将等其完成后执行，不中止任务），压缩完成后更新为最终卡——成功显示「会话压缩成功 + 压缩前后 context 对比（如 170k → 59k，-65%）+ 压缩后状态栏」，失败显示「会话压缩失败：<原因>」（错误信息截断 200 字符；起始卡未发出时退化为直接发失败消息）。入口按钮带 `confirm` 二次确认弹窗（压缩不可逆）。
   - 边界：compact 会中止进行中的 agent 任务（pi SDK 行为，接受不处理）；失败场景含 session 过小（"Nothing to compact"）、已压缩、模型无凭证。
+- **重新加载**：`config.reload` 对应 pi 的 `/reload`（Reload keybindings, extensions, skills, prompts, themes and context files）；调用 `AgentSession.reload()`（重读 settings、重置 API providers、重载资源并重建扩展 runtime），**不需要会话操作历史**但须已选会话（无会话时提示先选）；点击后立即弹「正在重新加载」状态卡（fire-and-forget，与压缩同链路），完成后更新为最终卡——成功「重新加载成功 + reload 后状态栏」，失败「重新加载失败：<原因> + 可再次点击「重新加载」重试」（错误信息截断 200 字符；起始卡未发出时退化为直接发失败消息）。每群 in-flight 守卫（`reloadingChats`）防连点重复重载；与压缩/agent 同受 session 锁串行（Agent 处理中会等待其完成）。**不刷新群公告**；入口按钮**无** `confirm`（非破坏操作）。状态卡链路与压缩会话共用 `runStatusCardOp`（fire-and-forget：starting 卡 → 操作 → success/failure 最终卡，起始卡未发出时降级为失败消息）。
+  - 扩展重启：SDK reload 内部仅在存在 uiContext/shutdownHandler/onError 等 bindings 时才自动重发 `session_start`；本项目只 `bindExtensions({ mode: 'print' })`，故 `PiSessions.reload` 在 `session.reload()` 后显式重新 `bindExtensions` 触发 `session_start`，MCP 等扩展随 reload 重启并重新初始化。
 - **历史卡片复用（无 nonce）**：卡片操作不携带 nonce、不依赖 pending 过期校验，历史卡（含二级选择器/表单）可重复使用——唯一限制是飞书卡片 14/30 天交互有效期（超期客户端提示、回调不达）与平台连点限流（~10s，客户端提示「操作太频繁」）。可用性由业务校验兜底：`session.use` 校验 session 属于当前项目且存在；`session.sync.submit` / `model.select` / `thinkingLevel.select` / `session.rename.submit` 校验当前 session 文件存在（toast「该会话已不存在，请使用「切换会话」重新选择」）；模型/思考强度由 pi SDK 校验 + 全局兜底 toast。挂起消息（`showSessionSetup` 暂存于 `pending`）在选中/新建会话后一次性续跑（`takePendingPrompt`：消费即删；超 `PENDING_PROMPT_MAX_MS`=30 分钟不续跑并 toast 提示，防陈旧请求被历史卡误触发）。
 - **点击去重**：SDK `safety.dedup.ttl` = 3s（默认 12h 会静默拦截同一卡片同一按钮的重复点击）；快速连点（~10s 内）由飞书平台限流拦截（客户端提示「操作太频繁」，事件不发出）；应用层防重推——卡片事件按 `event_id`（30 分钟）、消息按 `messageId`（1 小时）去重（`createSeenSet`，内存态）。合法重复点击不受限（新 `event_id` 放行）。
 
@@ -241,7 +243,7 @@
 lark-agent-os（单进程 + 实例锁）
   ├─ 事件分发：handleMessage / handleCardAction
   ├─ AgentRunManager：每群队列 + 状态机（750ms 节流预览）
-  ├─ PiSessions：pi SDK 封装（sessionFile 串行锁 + 32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / status）
+  ├─ PiSessions：pi SDK 封装（sessionFile 串行锁 + 32 个空闲实例 LRU；prompt / abort / models / thinkingLevel / rename / compact / reload / status）
   ├─ SessionSyncWatcher：电脑端 → 飞书同步（watch + 轮询，方案 B 进度推进）
   ├─ 命令执行器：普通命令（流式输出）+ backgroundTasks（常驻任务）
   ├─ LarkApi：tenant token 缓存 + 群公告 Docx API

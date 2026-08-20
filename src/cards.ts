@@ -161,6 +161,21 @@ export function compactFailureCard(detail: string): object {
   return { schema: '2.0', config: { summary: { content: '会话压缩失败' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**会话压缩失败**\n\n${detail}`) }] } };
 }
 
+/** 重新加载状态卡：点击「重新加载」后立即弹出（fire-and-forget），完成后由 reloadSuccessCard / reloadFailureCard 覆盖 */
+export function reloadStartingCard(): object {
+  return { schema: '2.0', config: { summary: { content: '正在重新加载' } }, body: { elements: [{ tag: 'markdown', content: '**正在重新加载配置**\n\n正在重新加载 keybindings、扩展、skills、prompts、themes 与 context 文件，请稍候…' }] } };
+}
+
+/** 重新加载成功卡：status = reload 后状态栏（可选，与压缩成功卡一致展示当前会话占用） */
+export function reloadSuccessCard(status?: string): object {
+  return { schema: '2.0', config: { summary: { content: '重新加载成功' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**重新加载成功**\n\n已重新加载 keybindings、扩展、skills、prompts、themes 与 context 文件。${status ? `\n\n${status}` : ''}`) }] } };
+}
+
+/** 重新加载失败卡：detail = 失败原因（提示可再次点击重试——再次 reload 会重启扩展并恢复 runtime） */
+export function reloadFailureCard(detail: string): object {
+  return { schema: '2.0', config: { summary: { content: '重新加载失败' } }, body: { elements: [{ tag: 'markdown', content: limitedMarkdown(`**重新加载失败**\n\n${detail}\n\n可再次点击「重新加载」重试。`) }] } };
+}
+
 export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode: 'group' | 'topic' = 'group'): object {
   // 话题模式：话题自动绑定独立 session（懒初始化），不提供会话管理/同步入口，工作路径固定不可修改；未绑定群仍需提示先绑定
   const bindingStatus = mode === 'topic'
@@ -176,8 +191,8 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
   });
   // 话题模式去掉：新建会话 / 切换会话 / 绑定项目 / 同步消息（话题 = 独立 session，无手动会话管理；话题 session 不参与同步）
   const sessionRowButtons = mode === 'topic'
-    ? [button('压缩会话', 'session.compact', COMPACT_CONFIRM)]
-    : [button('新建会话', 'session.new.form'), button('压缩会话', 'session.compact', COMPACT_CONFIRM), button('切换会话', 'session.resume.form'), button('同步消息', 'session.sync.form')];
+    ? [button('压缩会话', 'session.compact', COMPACT_CONFIRM), button('重新加载', 'config.reload')]
+    : [button('新建会话', 'session.new.form'), button('压缩会话', 'session.compact', COMPACT_CONFIRM), button('切换会话', 'session.resume.form'), button('同步消息', 'session.sync.form'), button('重新加载', 'config.reload')];
   const projectRowButtons = mode === 'topic'
     ? [button('执行命令', 'command.form'), button('快速提问', 'quickAsk.form'), button('创建项目群', 'project.create.form'), button('后台任务', 'bgTask.form')]
     : [button('执行命令', 'command.form'), button('快速提问', 'quickAsk.form'), button('创建项目群', 'project.create.form'), button('绑定项目', 'project.bind.form'), button('后台任务', 'bgTask.form')];
