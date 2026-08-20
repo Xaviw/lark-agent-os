@@ -40,6 +40,8 @@ export const SYNC_TRUNCATION_MARKER = '（同步内容过长，内容已截断�
 export const CHANNEL_DEDUP_TTL_MS = 3_000;
 /** 卡片事件 event_id 防重推窗口（长连接无 X-Refresh-Token header，用事件唯一 ID 兜底） */
 export const CARD_EVENT_SEEN_TTL_MS = 30 * 60_000;
+/** 话题反查（fetchMessage）限时：超过按非话题处理（不缓存、下次点击重试），避免网络慢时拖垮卡片回调 3s ack */
+export const CARD_THREAD_FETCH_TIMEOUT_MS = 2_000;
 /** 消息 messageId 防重复处理窗口（补偿 seenCache 缩短后断线重连/平台重推的空隙） */
 export const MESSAGE_SEEN_TTL_MS = 60 * 60_000;
 /** 挂起消息自动续跑的最大等待时间：超时不再续跑（防历史卡误触发陈旧请求），消费后即删 */
@@ -51,6 +53,8 @@ export const mediaRoot = join(stateRoot, 'media');
 export const MEDIA_CACHE_MAX_BYTES = nonNegativeIntegerEnv('LARK_MEDIA_CACHE_MAX_BYTES', 512 * 1024 * 1024);
 /** 单个附件下载超时 */
 export const MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
+/** 飞书开放平台 API 单次请求超时：杜绝网络挂起时请求无限等待（挂起会阻塞卡片回调 ack，触发平台重推） */
+export const LARK_API_TIMEOUT_MS = 15_000;
 /** 图片走模型视觉通道（images 参数）的单张大小上限；超限降级为路径注入 */
 export const MEDIA_IMAGE_INJECT_LIMIT = 10 * 1024 * 1024;
 /** 纯附件类消息类型：到达时不进 agent（贴纸静默；其余回轻提示），且其 content 为 normalize 占位 */

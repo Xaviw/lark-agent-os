@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { COMMAND_OUTPUT_LIMIT } from '../config.js';
+import { validatePathSyntax } from './workspace.js';
 
 /** 命令转义：防止用户输入的反引号 / 换行破坏卡片 markdown 渲染 */
 export function escapeCommand(command: string): string {
@@ -72,5 +73,8 @@ export function resolveWorkspacePath(input: string, baseCwd: string): string {
     throw new Error('仅支持 `~` 或 `~/...` 形式的用户目录路径。');
   }
   const expanded = value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value;
-  return resolve(baseCwd, expanded);
+  const cwd = resolve(baseCwd, expanded);
+  const invalid = validatePathSyntax(cwd);
+  if (invalid) throw new Error(`工作路径${invalid}`);
+  return cwd;
 }

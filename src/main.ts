@@ -23,6 +23,8 @@ await state.load();
 const pending = new Map<string, PendingEntry>();
 const backgroundTasks = new Map<string, BackgroundTask>();
 const commandTasks = new Map<string, CommandTask>();
+/** 后台 fire-and-forget 任务容器（同步 / 建群等）：shutdown 等待收尾 */
+const pendingBackground = new Set<Promise<unknown>>();
 const pi = new PiSessions(() => backgroundTasks.size);
 const api = new LarkApi(appId, appSecret);
 
@@ -38,7 +40,7 @@ const channel = createLarkChannel({
 
 // ── 组装点：构造 ctx（agentRuns / sessionSyncWatcher 先占位回填），attach 打破循环依赖 ──
 const ctx: AppContext = {
-  state, pi, api, lark: channel, defaultWorkspace, pending, backgroundTasks, commandTasks,
+  state, pi, api, lark: channel, defaultWorkspace, pending, backgroundTasks, commandTasks, pendingBackground,
   agentRuns: undefined!,
   sessionSyncWatcher: undefined!,
 };
@@ -93,6 +95,12 @@ async function shutdown(): Promise<void> {
     backgroundTasks.clear();
     sessionSyncWatcher.close();
     await agentRuns.shutdown();
+    // 等待后台 fire-and-forget 任务（手动同步 / 创建项目群）收尾：确保进度/绑定落盘后再 dispose；
+    // 上限 10s 防 shutdown 被慢链路（statusAt 初始化 / 大消息发送）无限阻塞，超时后不再等（进程退出自然中断剩余任务）
+    if (pendingBackground.size > 0) {
+      const pending = [...pendingBackground];
+      await Promise.race([Promise.allSettled(pending), new Promise<void>((resolve) => setTimeout(resolve, 10_000))]);
+    }
     await pi.dispose();
     await state.flush();
     await channel.disconnect();

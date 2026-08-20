@@ -1,4 +1,5 @@
 import { retryOnce } from './utils/retry.js';
+import { LARK_API_TIMEOUT_MS } from './config.js';
 
 const DOMAIN = 'https://open.feishu.cn';
 
@@ -60,6 +61,7 @@ export class LarkApi {
       method,
       headers: { Authorization: `Bearer ${await this.accessToken()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(LARK_API_TIMEOUT_MS),
     });
     if (!response.ok && response.status >= 500) {
       // 5xx 先抛出（body 可能非 JSON），走重试；4xx 等继续解析业务错误码（不重试）
@@ -77,12 +79,28 @@ export class LarkApi {
     const response = await fetch(`${DOMAIN}/open-apis/auth/v3/tenant_access_token/internal`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_id: this.appId, app_secret: this.appSecret }),
+      signal: AbortSignal.timeout(LARK_API_TIMEOUT_MS),
     });
     const payload = await response.json() as TokenResponse & { code?: number; msg?: string; expire?: number };
     if (!response.ok || !payload.tenant_access_token) throw new Error(`Feishu token error: ${payload.code} ${payload.msg}`);
     this.token = payload.tenant_access_token;
     this.tokenExpiresAt = Date.now() + ((payload.expire ?? 7200) - 60) * 1000;
     return this.token;
+  }
+
+  /** 读取 JSON 响应体并附加超时：fetch 的 signal 只覆盖响应头等待，不覆盖读体（body 传输挂起时请求会无限等待） */
+  private async readJson(response: Response, path: string): Promise<any> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        response.json(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Feishu API ${path}: 读取响应体超时`)), LARK_API_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

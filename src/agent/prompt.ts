@@ -16,8 +16,9 @@ export async function useNewSession(ctx: AppContext, chatId: string, cwd: string
   ctx.state.update(chatId, { activeSessionFile: sessionFile, sessionSync: undefined });
   await ctx.state.flush();
   await ctx.sessionSyncWatcher.reconcile();
-  await updateAnnouncement(ctx, chatId);
-  await sendChat(ctx, chatId, { markdown: `已新建会话：\`${name}\`` });
+  // 公告是辅助信息且为 Docx API 网络链，不阻塞会话创建与消息发送（避免卡片回调超 3s ack 窗口）；updateAnnouncement 内部已吞错
+  void updateAnnouncement(ctx, chatId);
+  await sendChat(ctx, chatId, { markdown: `已新建会话：\`${escapeMarkdown(name)}\`` });
 }
 
 /** 快段产物：不含附件段的 prompt 骨架 + 待下载资源列表 */

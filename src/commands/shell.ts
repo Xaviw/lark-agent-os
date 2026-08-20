@@ -8,10 +8,91 @@ import { commandFinalCard, commandRunningCard, commandStartingCard } from '../ca
 import { sendChat } from '../lark/chat-lifecycle.js';
 
 /**
+ * Windows cmd 内建命令（echo / dir / if 等）输出到管道或文件时按系统 ANSI 代码页（中文系统 = GBK）编码，
+ * `chcp 65001` 只改变控制台代码页，对非控制台输出**无效**；外部现代工具（node / git 等）则多为 UTF-8。
+ * 混合流无法用单一解码还原，故按行判定：UTF-8 严格解码成功且不含「中文输出中几乎不可能出现的异常
+ * Unicode 区块」→ 视为 UTF-8；否则按 GBK 兜底重解。合法 UTF-8 输出（含 emoji、Latin-1 符号）不受影响。
+ * 仅 Windows 使用（POSIX 输出恒按 UTF-8 透传，见 createOutputDecoder）。
+ * 已知局限：GBK 双字节被误读为合法 UTF-8 且未命中异常区块的稀有组合，或 Windows 上真实输出含泰文/藏文等
+ * 异常区块字符的 UTF-8 文本，仍可能误判（前者保持乱码=旧行为，后者罕见）。
+ */
+const SUSPICIOUS_BLOCKS = /[\u0370-\u03FF\u0400-\u04FF\u0530-\u058F\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0D80-\u0DFF\u0E00-\u0E7F\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u10A0-\u10FF\u1100-\u11FF\u1200-\u137F\u13A0-\u13FF\u1400-\u167F\u1700-\u171F\u1780-\u17FF\u1800-\u18AF\u1A00-\u1A1F\u2800-\u28FF\u2C80-\u2CFF\uAC00-\uD7AF\uE000-\uF8FF\uF900-\uFAFF]/;
+
+/** 单行字节解码（纯函数）：UTF-8 优先，异常区块或非法序列时 GBK 兜底 */
+const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true });
+const GBK_DECODER = new TextDecoder('gbk');
+
+export function decodeCommandLine(line: Buffer): string {
+  try {
+    const utf8 = UTF8_FATAL.decode(line);
+    if (!SUSPICIOUS_BLOCKS.test(utf8)) return utf8;
+    return GBK_DECODER.decode(line);
+  } catch {
+    return GBK_DECODER.decode(line);
+  }
+}
+
+/** 把含 \n 的完整字节段按行解码（保留 \r\n / \n 分隔符） */
+function decodeLines(complete: Buffer): string {
+  let text = '';
+  let start = 0;
+  for (let i = 0; i < complete.length; i++) {
+    if (complete[i] !== 0x0a) continue;
+    const hasCr = i > start && complete[i - 1] === 0x0d;
+    text += decodeCommandLine(complete.subarray(start, hasCr ? i - 1 : i)) + (hasCr ? '\r\n' : '\n');
+    start = i + 1;
+  }
+  return text;
+}
+
+/** pending 缓冲上限（字节）：无换行超长输出的内存保护，取展示上限 2 倍以尽量保持整行完整性 */
+const MAX_PENDING_BYTES = COMMAND_OUTPUT_LIMIT * 2;
+/** 强制解码时保留的尾部字节：覆盖最长多字节序列（UTF-8 4 字节），避免切断后解码错位 */
+const TAIL_KEEP_BYTES = 4;
+
+/**
+ * 流式输出解码器：按 \n 切行（保留 \r\n / \n 分隔符），跨 chunk 缓冲不完整行与尾字节；flush 处理命令结束时的残留。
+ * 仅 Windows 启用双解码（cmd 内建输出按 ACP=GBK、外部工具 UTF-8，逐行判定）；POSIX 输出恒为 UTF-8，直接透传
+ * （避免泰文/藏文等合法输出被误判 GBK）。无换行的超长输出有缓冲上限保护（超出部分强制解码丢弃）。
+ * platform 参数化便于独立验证（默认取运行平台）。
+ */
+export function createOutputDecoder(platform: NodeJS.Platform = process.platform): { push(chunk: Buffer): string; flush(): string } {
+  if (platform !== 'win32') {
+    return { push: (chunk: Buffer): string => chunk.toString('utf8'), flush: (): string => '' };
+  }
+  let pending: Buffer = Buffer.alloc(0);
+  const push = (chunk: Buffer): string => {
+    pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+    const lastNl = pending.lastIndexOf(0x0a);
+    if (lastNl >= 0) {
+      const complete = pending.subarray(0, lastNl + 1);
+      pending = pending.subarray(lastNl + 1);
+      return decodeLines(complete);
+    }
+    // 无换行超长输出保护：强制解码超出部分（GBK 双字节切断处显示替换符可接受），保留尾部少量字节继续缓冲
+    if (pending.length > MAX_PENDING_BYTES) {
+      const overflow = pending.subarray(0, pending.length - TAIL_KEEP_BYTES);
+      pending = pending.subarray(pending.length - TAIL_KEEP_BYTES);
+      return decodeCommandLine(overflow);
+    }
+    return '';
+  };
+  const flush = (): string => {
+    const rest = pending;
+    pending = Buffer.alloc(0);
+    if (!rest.length) return '';
+    const hasCr = rest[rest.length - 1] === 0x0d;
+    return decodeCommandLine(hasCr ? rest.subarray(0, -1) : rest);
+  };
+  return { push, flush };
+}
+
+/**
  * 平台感知的 shell 解析（纯函数，便于独立验证）：
  * - Windows：固定 cmd.exe（/d 禁 AutoRun、/s 剥离首尾引号、/c 执行命令），减少回退成本；命令前自动前置
- *   `chcp 65001 >nul &&` 把代码页切为 UTF-8，使 cmd 内建命令 / 错误消息 / 多数现代工具（git、node 等）的
- *   输出与 Node 的 UTF-8 解码一致（极少按 GBK 硬编码输出的老程序仍会乱码，属已知局限）；
+ *   `chcp 65001 >nul &&`——注意：chcp 只改控制台代码页，对 cmd 内建命令的管道/文件输出**无效**
+ *   （其输出恒按系统 ANSI 代码页，中文系统 = GBK），保留仅为兼容；内建命令中文乱码由 createOutputDecoder 的
+ *   逐行双解码（UTF-8 优先 + GBK 兜底）解决，外部现代工具（git、node 等）自选 UTF-8 不受影响；
  * - macOS / Linux 等 POSIX：沿用 $SHELL（如 /bin/zsh），缺省 /bin/sh（-lc 登录 shell 执行）。
  * 注：Windows 回退 cmd.exe 后 POSIX 命令（ls 等）不可用，需使用 cmd 语法（dir 等；跨盘 cd 需 /d）。
  * 如变更 Windows shell 策略（如改用 PowerShell），需同步更新 commandFormCard 的 Windows 提示文案（src/cards.ts）。
@@ -55,6 +136,9 @@ export async function runShellCommand(
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      // 默认转义会把 `"` 传给 cmd：参数位置可解析，但重定向目标（`> "path"`）不认转义而报「语法不正确」；
+      // verbatim 原样传引号，与 cmd 解析规则一致（POSIX 上该选项被忽略）。
+      windowsVerbatimArguments: true,
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -80,22 +164,25 @@ export async function runShellCommand(
   let stdout = '';
   let stderr = '';
   const startedAt = Date.now();
-  const append = (current: string, chunk: Buffer): string => `${current}${chunk.toString('utf8')}`.slice(-COMMAND_OUTPUT_LIMIT);
+  const append = (current: string, addition: string): string => `${current}${addition}`.slice(-COMMAND_OUTPUT_LIMIT);
   const task: CommandTask = {
     child, chatId, command, cwd, stopped: false, timedOut: false, timeoutSeconds, startedAt, stdout: '', stderr: '', terminate: () => terminateProcessGroup(child),
   };
+  // 逐行双解码（cmd 内建 GBK / 外部工具 UTF-8 混合流）：stdout / stderr 各自独立缓冲
+  const decodeOut = createOutputDecoder();
+  const decodeErr = createOutputDecoder();
   // 流式节流：stdout/stderr 触发 750ms 节流原位更新执行中卡片（stdout/stderr 原样展示；无「查看输出」按钮，仅「停止」）
   const throttled = createThrottledUpdate(() => {
     if (task.updater) void task.updater.update(commandRunningCard(taskId, command, cwd, timeoutSeconds, commandOutputMarkdown(command, stdout, stderr, COMMAND_CARD_OUTPUT_LIMIT)))
       .catch((error) => console.warn('[command output status]', error));
   }, COMMAND_CARD_UPDATE_INTERVAL_MS);
   child.stdout?.on('data', (chunk: Buffer) => {
-    stdout = append(stdout, chunk);
+    stdout = append(stdout, decodeOut.push(chunk));
     task.stdout = stdout;
     throttled.trigger();
   });
   child.stderr?.on('data', (chunk: Buffer) => {
-    stderr = append(stderr, chunk);
+    stderr = append(stderr, decodeErr.push(chunk));
     task.stderr = stderr;
     throttled.trigger();
   });
@@ -119,6 +206,9 @@ export async function runShellCommand(
     : undefined;
 
   const result = await resultPromise;
+  // 命令结束：flush 未换行的尾字节（无新行时流式卡不触发，最终卡需包含全部输出）
+  stdout = append(stdout, decodeOut.flush());
+  stderr = append(stderr, decodeErr.flush());
   throttled.cancel();
   if (timeout) clearTimeout(timeout);
   ctx.commandTasks.delete(taskId);

@@ -10,9 +10,9 @@ export interface SubmitRunOptions {
   sessionFile: string;
   /** 提交时的 prompt 骨架（引用附件段可能由 prepare 补齐） */
   prompt: string;
-  /** 卡片展示用 prompt（如 AI 智能执行显示用户输入而非完整提示词）；默认 = prompt */
+  /** 卡片展示用 prompt（如快速提问显示用户输入而非完整提示词）；默认 = prompt */
   displayPrompt?: string;
-  /** 执行成功回调（AI 智能执行：解析翻译结果并转交命令执行）；失败/停止不调用 */
+  /** 执行成功回调（快速提问等场景可在成功后再转交后续流程）；失败/停止不调用 */
   onResult?: (answer: string) => void;
   id?: string;
   /** 后台附件准备（下载被引用资源 → 最终 prompt）；提交时立即启动，execute 前 await */
@@ -207,7 +207,7 @@ export class AgentRunManager {
         await run.updater.update(agentRunningCard(run.id, run.displayPrompt ?? run.prompt, run.latestOutput)).catch((error) => console.warn('[agent final preview]', error));
       }
       run.state = isStopping() ? 'cancelled' : 'succeeded';
-      // 最终回复只追加：保留中途上下文（请求行，AI 智能执行场景）与完整流式累积（天然包含中途已显示内容）；
+      // 最终回复只追加：保留中途上下文（请求行，快速提问场景）与完整流式累积（天然包含中途已显示内容）；
       // 防御：与最新预览不一致时拼接保留，绝不丢弃已显示内容
       const latest = run.latestOutput?.trim();
       const answer = latest && !result.answer.startsWith(latest) ? `${latest}\n\n${result.answer}` : result.answer;
@@ -216,7 +216,7 @@ export class AgentRunManager {
         ? agentFinalCard('Agent 已停止', run.latestOutput || '已停止处理。', result.status, elapsedSince(run.startedAt))
         : agentFinalCard('Agent 处理完成', finalContent, result.status, elapsedSince(run.startedAt));
       await run.updater.finish(card).catch((error) => console.warn('[agent final status]', error));
-      // 成功后才转交后续流程（AI 智能执行：解析翻译结果 → 命令执行）；失败/停止不调用
+      // 成功后才转交后续流程（快速提问等 onResult 场景）；失败/停止不调用
       // try 保护：回调异常不得把已完成 run 误标 failed 或覆盖最终卡
       try {
         run.onResult?.(result.answer);

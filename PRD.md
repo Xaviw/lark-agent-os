@@ -45,7 +45,7 @@
 | --- | --- |
 | 1 | 切换模型 `model.form` · 切换思考强度 `thinkingLevel.form` · 重命名会话 `session.rename.form` |
 | 2 | 新建会话 `session.new.form` · 压缩会话 `session.compact` · 切换会话 `session.resume.form` · 同步消息 `session.sync.form` |
-| 3 | 执行命令 `command.form` · 创建项目群 `project.create.form` · 绑定项目 `project.bind.form` · 后台任务 `bgTask.form` |
+| 3 | 执行命令 `command.form` · 快速提问 `quickAsk.form` · 创建项目群 `project.create.form` · 绑定项目 `project.bind.form` · 后台任务 `bgTask.form` |
 
 - 提示语：未绑定群 →"此群尚未绑定项目，请先绑定。"；已绑定未选会话 →"请使用"新建会话"或"切换会话"。"（话题模式不显示绑定 / Session 提示，按钮裁剪见「话题窗口（thread）」）
 
@@ -55,7 +55,7 @@
 - 排队：发「Agent 等待处理」卡（含停止按钮，**无确认弹窗**——排队中停止即撤销提交，无损失）；排队中停止 → 取消（"已在开始前取消"）。
 - 执行中：原位更新「Agent 正在处理」卡，以 **750ms 节流**刷新回复预览（事件驱动，无新输出不刷新），含停止按钮（**带 `confirm` 二次确认弹窗**）。
 - 停止：立即发过渡卡「正在停止 Agent」且**携带当前最新输出**（内容不丢失）；`pi.abort()` 完成后最终卡「Agent 已停止」= 完整输出 + 状态栏。过渡卡移除停止按钮，避免重复 abort。
-- 完成 / 失败：最终卡无按钮，标题含耗时（如"Agent 处理完成 - 耗时：23 秒"）；**最终回复只追加**——prompt 返回后先补渲染最新流式帧（节流可能未触发，避免「中途帧 → 最终卡」跳变），最终卡保留中途上下文（`displayPrompt` 请求行，AI 智能执行场景）+ 完整流式累积（含中途已显示内容，不一致时拼接保留），仅追加完成状态；失败 = 已有输出 + 错误信息 + 状态栏。
+- 完成 / 失败：最终卡无按钮，标题含耗时（如"Agent 处理完成 - 耗时：23 秒"）；**最终回复只追加**——prompt 返回后先补渲染最新流式帧（节流可能未触发，避免「中途帧 → 最终卡」跳变），最终卡保留中途上下文（`displayPrompt` 请求行，快速提问场景）+ 完整流式累积（含中途已显示内容，不一致时拼接保留），仅追加完成状态；失败 = 已有输出 + 错误信息 + 状态栏。
 - 边界：停止后预览节流停止（`state !== running`）；多群并行、每群串行（同一 session 文件被多群共享时，prompt/compact/rename 等写操作跨群同样串行，按 sessionFile 锁）；服务关闭时统一停止并通知（见 2.8）。
 
 **回复引用上下文（含引用附件）**
@@ -71,7 +71,7 @@
 - 飞书「创建话题」后，话题窗口中的消息事件与原会话共享 `chat_id`、额外带 `thread_id`；话题窗口不是独立 chat，但对话归属**独立 session**（不 fork、不继承主会话历史）。
 - **懒初始化**：话题内首次 `@bot`（群）/ 任意消息（私聊）时自动新建 session（命名 `话题-MM-DD HH:mm`，电脑端 pi 列表可见）并绑定 `threadId`；之后话题内对话持续写入该 session，与主会话完全隔离（不写入主会话、不依赖主会话已选 Session）。同一 threadId 并发首条消息只创建一次（in-flight 守卫 + 双检）；多个话题各自独立 session；不同群可存在相同 threadId（按 chatId 隔离）。
 - 触发规则沿用原会话：群话题内须 `@bot`（`/help` 免 `@`）；私聊话题免 `@`。话题内 `@bot` 而群未绑定项目 → 仍提示先绑定。
-- **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 命令 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩）作用于**话题 session** 而非主会话。
+- **help 话题模式**：去掉「新建会话 / 切换会话 / 绑定项目 / 同步消息」按钮（话题自动绑定独立 session，无手动会话管理；话题 session 不参与同步）；工作路径显示群绑定 cwd 并标注「话题固定使用该工作路径，不支持修改」（未绑定群仍提示先绑定）；保留模型 / 思考强度 / 重命名 / 压缩 / 命令 / 快速提问 / 创建项目群 / 后台任务。话题内的会话操作（切换模型、思考强度、重命名、压缩）作用于**话题 session** 而非主会话。
 - **公告**：话题内不触发群公告（懒初始化建会话、切换模型、设置思考强度、重命名均跳过公告刷新）；话题不会产生独立公告。
 - **卡片操作感知**：cardAction 事件无 `threadId`，优先命中**发送侧记录**（本服务发出卡片时记录 messageId → threadId，普通群卡片链零网络开销），未记录（重启后旧卡）才 `fetchMessage(event.messageId)` 反查（in-flight 守卫；失败不缓存、按非话题处理）；`handleCardAction` 内**惰性反查**（`agent.stop` / `command.stop` 零反查）。话题内卡片操作：会话解析为话题 session；响应 `replyTo` 触发卡（保持在话题窗口内，含命令卡）；群级 cmd（新建 / 切换 / 创建 / 使用 session、绑定项目、同步消息）直接拒绝（toast「话题内不支持该操作，请回到群聊使用」，防旧卡 / 直连）；`pending` 仅主会话挂起消息使用（key = `chatId`）。
 - **不同步**：话题 session 不参与电脑端 → 飞书同步（watcher 只监听主会话 activeSessionFile）；同步游标 / 防回环 / inFlight 均不涉及话题 session（`markFeishuOriginEntries` 按主会话 activeSessionFile 匹配，话题轮次不标记、不累积；进程异常退出后 reconcile 清理话题 inFlight 仅清不标）。话题窗口内对话由飞书 → 电脑端方向直接写入共享 JSONL，电脑端 resume 可见。
@@ -99,7 +99,7 @@
 
 - 表单：群名称（可选）+ 工作路径（必填，解析规则见下）。
 - 默认群名 = `basename(cwd)` + 本地时间 `YYMMDDHHmm`（如 `my-project2508100932`；`basename` 为空兜底 `project`；用本地时区）。
-- 流程：`lark.createChat` 创建新群并邀请操作者 → state 绑定（`chatType: group`）→ 发送欢迎消息 → 更新公告 → 确认消息 + toast。
+- 流程：`lark.createChat` 创建新群并邀请操作者 → state 绑定（`chatType: group`）→ 发送欢迎消息 → 更新公告 → 确认消息 + toast。提交为 fire-and-forget（toast「正在创建项目群…」先行，后台执行；成功由新群欢迎消息 + 本群确认消息呈现，失败补发错误消息）——建群 + 公告 Docx 链可能超过飞书 3s 回调窗口（见「点击去重」段）；配每群 in-flight 守卫（`creatingGroups`），进行中重复提交 toast「正在创建项目群，请稍候。」
 
 **绑定项目（`project.bind.form/submit`，bindProject）**
 
@@ -110,7 +110,7 @@
 
 **私聊自动绑定**：私聊首条消息自动绑定 `LARK_DEFAULT_WORKSPACE`；已有绑定但路径不符则覆盖。
 
-**工作路径解析**：支持绝对路径、`~` / `~/...`、相对当前工作路径；`~foo` 等非法形式报错；表单展示相对基准。
+**工作路径解析**：支持绝对路径、`~` / `~/...`、相对当前工作路径；`~foo` 等非法形式报错；表单展示相对基准。**语法校验（平台感知）**：Windows 拒绝非法字符（`<>:"|?*`，`:` 仅允许盘符位）、控制字符、段尾空格/点、保留设备名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9，含扩展名）、非盘符/UNC 绝对路径；POSIX 拒绝 NUL 字符；均限长 4096 字节。**存在性校验**：创建项目群 / 绑定项目提交时，解析后的路径必须已存在且为目录（文件或不存在 → toast 报错，不执行）。
 
 **群公告（Docx API）**
 
@@ -128,26 +128,24 @@
 
 **表单（`command.form`）**
 
-- 「命令」与「AI 智能执行」二选一（可都填：**AI 智能执行优先**，都空则报错）；超时秒数（可选，1–86,400 整数，输入框**默认值 10**，可修改或清空——清空即不自动停止）。
+- 「命令」必填（空则报错）；超时秒数（可选，1–86,400 整数，输入框**默认值 10**，可修改或清空——清空即不自动停止）。
 - 「常驻任务」勾选器（`checker` 组件，`name: 'isBackground'`）：JSON 2.0 支持；约束飞书客户端 V7.9+（低版本显示占位）。
 - 提交解析：`cardFormValue` 需支持 boolean 值（当前只提取 string，需扩展）。
 
 **普通模式**
 
-- `spawn(shell, [...args, commandPrefix + cmd])`，在群绑定工作路径执行；shell 平台感知（`resolveShell`）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；命令前自动前置 `chcp 65001 >nul && ` 把代码页切为 UTF-8，cmd 内建命令 / 错误消息 / 多数现代工具输出与 Node 的 UTF-8 解码一致，极少按 GBK 硬编码输出的老程序仍会乱码），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；spawn 带 `windowsHide: true`。
+- `spawn(shell, [...args, commandPrefix + cmd])`，在群绑定工作路径执行；shell 平台感知（`resolveShell`）——Windows 固定 `cmd.exe /d /s /c`（POSIX 命令如 `ls` 不可用，需 cmd 语法；命令前自动前置 `chcp 65001 >nul && `，但 chcp 只改控制台代码页、对 cmd 内建命令管道输出无效——内建中文按系统 ANSI 代码页（GBK）输出，由 `decodeCommandLine` 逐行双解码还原（仅 Windows 启用，POSIX 直接 UTF-8 透传）；外部现代工具（git/node 等）自选 UTF-8 不受影响），macOS / Linux 沿用 `$SHELL`（缺省 `/bin/sh`，`-lc`）；spawn 带 `windowsHide: true` + `windowsVerbatimArguments: true`（原样传引号，修复默认转义下 `> "path"` 重定向失败）。
 - 执行中卡片**流式节流更新**：stdout/stderr `data` 事件触发 750ms 节流，**stdout/stderr 原样**原位刷新卡片；**无「查看输出」按钮**，仅「停止」。
 - 结束：最终卡 = 已流式显示的累计输出 + **追加状态消息**（`\n\n命令执行完成。` / `命令执行失败（退出码 N，信号 S）。` / `命令超时（N 秒）并已停止。` / `命令已手动停止。`），标题保留状态文本；输出统一使用可容纳内嵌反引号的动态长度 code fence。
 - 停止：进程组 SIGTERM → 5s 未退 SIGKILL（Windows 退化为单进程 kill）；点击停止后先追加「正在停止命令」；停止按钮带 `confirm` 二次确认弹窗。
 - 超时：到点先更新最终卡再终止进程组。
 - 边界：输出内存截断 30 KB；卡片 6000 字符限制（头 1/3 + 尾部 + 截断标记），输出超 `COMMAND_FOLD_THRESHOLD`（2000 码点）时最终卡折叠为「首屏预览（前 1200 码点 + 补闭合 code fence）+ 默认收起的 `collapsible_panel`（面板内完整输出，展开可见全部）」；spawn 失败提示「命令启动失败」；节流 + `createCardUpdater` 串行化防高频写卡。
 
-**AI 智能执行（`command.form` 表单内）**
+**快速提问（`quickAsk.form` 表单内，help 项目按钮行独立入口）**
 
-- 「AI 智能执行」输入框：大白话或命令，AI 翻译为当前平台真实可执行的命令后执行；**优先于「命令」框**（都填时走 AI）；「常驻任务」勾选同样生效（翻译后后台执行）。
-- 流程（`runAiCommand`，`src/agent/ai-command.ts`）：每群固定「智能执行」session（懒创建持久化 `binding.aiCommandSessionFile`；首次创建时同步主 session 当前模型；独立于主会话，**不参与电脑端同步、不触发公告**）→ 翻译任务进 AgentRunManager 每群队列（排队/生成中卡复用 agent 卡链，停止按钮 `agent.stop` 复用，inFlight 防回环标记复用）→ 单轮 prompt → 解析翻译结果 → 转交 `startShellCommand`（超时 / 常驻 / 流式卡 / chcp 编码修复全复用）。
-- 提示词（`buildAiCommandPrompt` 纯函数）：注入平台（Windows cmd / POSIX）、shell（**派生自 `resolveShell`**，与真实执行一致）、cwd；要求区分环境、全角符号转半角（～ → ~）、~ 用户目录、输入已是命令时保持原样仅修格式错误、危险操作拒绝（command 空 + reason 说明）；输出严格 JSON `{"command", "reason"}`。
-- 解析（`parseAiCommandOutput` 纯函数）：剥 code fence → JSON.parse → command 非空即执行；command 空 = 拒绝（发消息展示 reason，不执行）；非 JSON / 缺 command 字段视为格式无效，展示原因且不执行。
-- 失败 / 停止不转交执行；翻译成功才执行，无自动纠错（第一版）；「AI 智能执行」session 出现在切换会话列表（命名「智能执行」，可辨识）。
+- 「快速提问」：**一次性无上下文 agent 问答**，用于项目群任务之外的简单提问（不占用主会话、不带历史关联）；help 卡片第二行按钮「快速提问」→ `askFormCard`（单个「问题」输入框，必填）→ `quickAsk.submit`；话题内同样可用（回复到触发表单卡）。
+- 流程（`runQuickAsk`，`src/agent/ask.ts`）：每群固定「快速提问」session（懒创建持久化 `binding.askSessionFile`，读取兼容旧字段 `aiCommandSessionFile`；首次创建时同步主 session 当前模型；独立于主会话，**不参与电脑端同步、不触发公告**）→ 提问任务进 AgentRunManager 每群队列（排队/生成中卡复用 agent 卡链，停止按钮 `agent.stop` 复用，inFlight 防回环标记复用）→ **用户输入原样作为 prompt（无提示词注入）** → agent 回复由卡链直接呈现（无解析、无命令转交）。
+- 「快速提问」session 出现在切换会话列表（命名「快速提问」，可辨识）。
 
 **常驻任务（后台任务）模式**
 
@@ -171,11 +169,11 @@
 **自动同步**
 
 - 监听活动 session 文件所在目录（`fs.watch`）+ 60s 轮询大小 / mtime 兜底；变化 750ms 防抖。
-- 群无进行中飞书任务（`agentRuns.isActive` 与 `inFlightFeishuRun` 均空）时，同步**最新完成一轮**电脑端对话：标题行 `[User] 时间戳` / `[Agent] 时间戳` **加粗**，每条消息内容后跟**空行**；post 行结构（每行独立 text 元素，不经 md 解析）+ 状态栏（可选）。
+- 群无进行中飞书任务（`agentRuns.isActive` 与 `inFlightFeishuRun` 均空）时，同步**最新完成一轮**电脑端对话：标题行 `[User] 时间戳` / `[Agent] 时间戳` **加粗**（text 元素 + style），每条消息内容后跟**空行**（text 元素）；post 行结构，内容行用 `md` 元素（飞书原生 markdown 渲染，与 agent 回复一致）+ 状态栏（可选）。
 - 当多个群共享同一 `activeSessionFile` 时，忙碌判定按 session 文件维度执行：任一绑定群存在 Agent run 或飞书 in-flight 轮次，所有绑定群均暂缓自动同步；run 完成后统一重新调度这些群。
 - 同步前两次 stat 校验（间隔 100ms），不一致视为写入中，指数退避重试（最多 3 次）。
 
-**手动同步**：`sync` 表单可填轮数（正整数 ≤ 1000，留空全部）；toast 结果。若 compact 等操作导致旧进度 entry id 消失，本次仅清除失效游标并提示再次同步；再次同步从当前文件重新选择轮次，可能包含已发送历史，但不静默跳过未同步轮次。
+**手动同步**：`sync` 表单可填轮数（正整数 ≤ 1000，留空全部）。提交为 fire-and-forget：toast「正在同步消息，请稍候。」先行，后台执行 `syncComputerSessions` 后结果（已同步条数 / 重试 / 忙碌 / 进度重置 / 无待同步）以消息呈现，失败补发错误消息——同步链路（解析 session JSONL + `statusAt` 快照初始化 + 28KB 富文本发送）可能超过飞书 3s 回调窗口；配每群 in-flight 守卫（`syncingChats`），进行中重复提交 toast「正在同步消息，请稍候。」。若 compact 等操作导致旧进度 entry id 消失，本次仅清除失效游标并提示再次同步；再次同步从当前文件重新选择轮次，可能包含已发送历史，但不静默跳过未同步轮次。
 
 **防回环（方案 B）**
 
@@ -224,7 +222,7 @@
 
 **启动流程**：校验 env → 建目录加载 state → 获取锁 → 初始化 pi / 飞书通道 → 连接 → reconcile watcher 与 inFlight → 刷新已绑定群公告。
 
-**优雅关闭（SIGINT / SIGTERM）**：终止 `commandTasks` 与 `backgroundTasks`（进程组 SIGTERM → 5s SIGKILL）→ 关闭 watcher → 停止 agent 任务（排队取消、执行中 abort，1.5s 内发送「服务正在关闭」卡）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
+**优雅关闭（SIGINT / SIGTERM）**：终止 `commandTasks` 与 `backgroundTasks`（进程组 SIGTERM → 5s SIGKILL）→ 关闭 watcher → 停止 agent 任务（排队取消、执行中 abort，1.5s 内发送「服务正在关闭」卡）→ 等待后台 fire-and-forget 任务收尾（手动同步 / 建群，上限 10s，确保进度 / 绑定落盘）→ `pi.dispose` → flush state → 断开飞书 → 释放锁退出。
 - 已知竞态：`process.exit(0)` 可能先于 SIGKILL 兜底定时器，忽略 SIGTERM 的进程可能残留。
 
 **群生命周期（机器人被移出群 / 群解散）**：SDK 未订阅 `bot.removed` / `disbanded` 事件，以外向发送失败信号驱动清理（`src/lark/chat-lifecycle.ts`）：
@@ -271,7 +269,7 @@ lark-agent-os（单进程 + 实例锁）
 - 飞书应用：启用机器人消息事件（WebSocket）；`im:chat`（建群）；群公告 Docx API 需在群内且具公告编辑权限（群主 / 管理员限定群需额外权限）。
 - pi SDK：读取本机 `~/.pi/agent` 的 provider / model / auth 配置。
 - pi 扩展：飞书会话与 pi CLI 共享用户级扩展（`~/.pi/agent/settings.json` 的 `packages`，如 pi-mcp-adapter / pi-web-access / pi-subagents）；会话打开时 `bindExtensions` 触发 `session_start` 初始化（否则 pi-mcp-adapter 不启动、`mcp` 工具调用返回 "MCP not initialized"），释放时发 `session_shutdown` 清理。
-- 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`（前置 `chcp 65001` 切 UTF-8 代码页）、POSIX `$SHELL`（默认 `/bin/sh`）。
+- 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`（前置 `chcp 65001`，对 cmd 内建管道输出无效，内建中文经逐行双解码 `decodeCommandLine` 还原，仅 Windows 启用）、POSIX `$SHELL`（默认 `/bin/sh`，输出直接 UTF-8 透传）。
 
 ---
 

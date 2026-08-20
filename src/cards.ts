@@ -164,8 +164,8 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
     ? [button('压缩会话', 'session.compact', COMPACT_CONFIRM)]
     : [button('新建会话', 'session.new.form'), button('压缩会话', 'session.compact', COMPACT_CONFIRM), button('切换会话', 'session.resume.form'), button('同步消息', 'session.sync.form')];
   const projectRowButtons = mode === 'topic'
-    ? [button('执行命令', 'command.form'), button('创建项目群', 'project.create.form'), button('后台任务', 'bgTask.form')]
-    : [button('执行命令', 'command.form'), button('创建项目群', 'project.create.form'), button('绑定项目', 'project.bind.form'), button('后台任务', 'bgTask.form')];
+    ? [button('执行命令', 'command.form'), button('快速提问', 'quickAsk.form'), button('创建项目群', 'project.create.form'), button('后台任务', 'bgTask.form')]
+    : [button('执行命令', 'command.form'), button('快速提问', 'quickAsk.form'), button('创建项目群', 'project.create.form'), button('绑定项目', 'project.bind.form'), button('后台任务', 'bgTask.form')];
   return {
     schema: '2.0', config: { summary: { content: 'lark-agent-os 操作面板' } }, body: { elements: [
       { tag: 'markdown', content: `**当前工作路径**\n\`${cwd}\`${bindingStatus}${sessionStatus}` }, { tag: 'hr' },
@@ -193,13 +193,22 @@ export function commandFormCard(cwd: string, isWindows: boolean): object {
     ? '\n\n当前为 Windows 环境，请使用 cmd 语法，如 `cd /d d:\\company && dir`（跨盘需 `/d`；`ls` 请用 `dir`；`/d:/` 风格仅在 Git Bash 内有效）。'
     : '';
   return { schema: '2.0', config: { summary: { content: '执行命令' } }, body: { elements: [
-    { tag: 'markdown', content: `**执行命令**\n\n工作路径：\`${cwd}\`\n\n**AI 智能执行**：输入大白话或命令，AI 翻译为当前平台命令后执行（优先于下方命令框）。${platformHint}` },
+    { tag: 'markdown', content: `**执行命令**\n\n工作路径：\`${cwd}\`${platformHint}` },
     { tag: 'form', name: 'command_form', elements: [
-      { tag: 'input', name: 'aiCommand', label: { tag: 'plain_text', content: 'AI 智能执行（可选）' }, placeholder: { tag: 'plain_text', content: '例如：查看当前目录剩余空间' } },
       { tag: 'input', name: 'command', label: { tag: 'plain_text', content: '命令' }, placeholder: { tag: 'plain_text', content: 'pnpm test' } },
       { tag: 'input', name: 'timeoutSeconds', label: { tag: 'plain_text', content: '超时（秒，可选）' }, placeholder: { tag: 'plain_text', content: '默认 10 秒，可修改或清空（清空则不自动停止）' }, default_value: '10' },
       { tag: 'checker', name: 'isBackground', text: { tag: 'plain_text', content: '常驻任务（忽略超时，后台持续运行）' }, checked: false },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '执行' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'command.submit' } }] },
+    ] },
+  ] } };
+}
+
+export function askFormCard(cwd: string): object {
+  return { schema: '2.0', config: { summary: { content: '快速提问' } }, body: { elements: [
+    { tag: 'markdown', content: `**快速提问**\n\n工作路径：\`${cwd}\`\n\n无上下文关联的一次性提问，不会写入当前会话、不影响对话上下文。` },
+    { tag: 'form', name: 'quick_ask_form', elements: [
+      { tag: 'input', name: 'prompt', label: { tag: 'plain_text', content: '问题' }, placeholder: { tag: 'plain_text', content: '例如：这个项目如何启动？' }, required: true },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '提问' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'quickAsk.submit' } }] },
     ] },
   ] } };
 }
@@ -248,7 +257,7 @@ export function closeCodeFence(partial: string, full: string): string {
 
 export function createProjectFormCard(baseCwd: string): object {
   return { schema: '2.0', config: { summary: { content: '创建项目群' } }, body: { elements: [
-    { tag: 'markdown', content: `**创建项目群**\n\n相对路径将以当前工作路径 \`${baseCwd}\` 为基准；支持绝对路径和 \`~/...\`。` },
+    { tag: 'markdown', content: `**创建项目群**\n\n相对路径将以当前工作路径 \`${baseCwd}\` 为基准；支持绝对路径和 \`~/...\`；工作路径必须已存在且为目录。` },
     { tag: 'form', name: 'project_create_form', elements: [
       { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '群名称' }, placeholder: { tag: 'plain_text', content: 'Pi · 项目名称' } },
       { tag: 'input', name: 'cwd', label: { tag: 'plain_text', content: '工作路径' }, placeholder: { tag: 'plain_text', content: '~/Codes/my-project 或 ../my-project' }, required: true },
@@ -273,7 +282,7 @@ export function bgTaskListCard(tasks: Array<{ id: string; command: string; start
 export function bindProjectFormCard(baseCwd: string, bound: boolean): object {
   const title = bound ? '修改绑定' : '绑定项目';
   return { schema: '2.0', config: { summary: { content: title } }, body: { elements: [
-    { tag: 'markdown', content: `**${title}**\n\n将当前群绑定到工作路径。相对路径将以当前工作路径 \`${baseCwd}\` 为基准；支持绝对路径和 \`~/...\`。` },
+    { tag: 'markdown', content: `**${title}**\n\n将当前群绑定到工作路径。相对路径将以当前工作路径 \`${baseCwd}\` 为基准；支持绝对路径和 \`~/...\`；工作路径必须已存在且为目录。` },
     { tag: 'form', name: 'project_bind_form', elements: [
       { tag: 'input', name: 'cwd', label: { tag: 'plain_text', content: '工作路径' }, placeholder: { tag: 'plain_text', content: '~/Codes/my-project 或 ../my-project' }, required: true },
       { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: bound ? '保存绑定' : '绑定项目' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'project.bind.submit', baseCwd } }] },

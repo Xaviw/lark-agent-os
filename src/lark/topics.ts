@@ -1,4 +1,5 @@
 import type { NormalizedMessage } from '@larksuite/channel';
+import { CARD_THREAD_FETCH_TIMEOUT_MS } from '../config.js';
 import type { AppContext } from '../app-context.js';
 import { topicSessionName } from '../utils/format.js';
 import { workspaceForChat } from '../sync/sync-service.js';
@@ -75,11 +76,18 @@ export function cardThreadId(ctx: AppContext, messageId: string): Promise<string
   if (inflight) return inflight;
   const pending = (async (): Promise<string | undefined> => {
     try {
-      const threadId = (await ctx.lark.fetchMessage(messageId))?.threadId ?? undefined;
-      cardThreadCache.set(messageId, threadId);
-      if (cardThreadCache.size > 1000) {
-        const oldest = cardThreadCache.keys().next().value;
-        if (oldest !== undefined) cardThreadCache.delete(oldest);
+      // 反查限时：网络慢时同步等待会拖垮卡片回调 ack（3s 窗口）；超时按非话题处理（不缓存，下次点击重试）
+      const fetched = await Promise.race([
+        ctx.lark.fetchMessage(messageId).then((msg) => ({ kind: 'ok' as const, msg })),
+        new Promise<{ kind: 'timeout' }>((resolve) => setTimeout(() => resolve({ kind: 'timeout' }), CARD_THREAD_FETCH_TIMEOUT_MS)),
+      ]);
+      const threadId = fetched.kind === 'ok' ? (fetched.msg?.threadId ?? undefined) : undefined;
+      if (fetched.kind === 'ok') {
+        cardThreadCache.set(messageId, threadId);
+        if (cardThreadCache.size > 1000) {
+          const oldest = cardThreadCache.keys().next().value;
+          if (oldest !== undefined) cardThreadCache.delete(oldest);
+        }
       }
       return threadId;
     } catch {

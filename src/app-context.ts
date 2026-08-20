@@ -23,6 +23,8 @@ export interface AppContext {
   backgroundTasks: Map<string, BackgroundTask>;
   /** 前台命令任务 */
   commandTasks: Map<string, CommandTask>;
+  /** 后台 fire-and-forget 任务（手动同步 / 创建项目群等）：shutdown 时等待收尾，避免进度/绑定未落盘 */
+  pendingBackground: Set<Promise<unknown>>;
   agentRuns: AgentRunManager;
   sessionSyncWatcher: SessionSyncWatcher;
 }

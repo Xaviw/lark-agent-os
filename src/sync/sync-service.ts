@@ -97,7 +97,13 @@ export async function syncComputerSessions(
         rows = truncateSyncRows(rows, SYNC_BODY_BYTE_LIMIT);
         truncated = true;
       }
-      const content = rows.map((row) => [{ tag: 'text', text: row.text, ...(row.bold ? { style: ['bold'] } : {}) }]);
+      const content = rows.map((row) => {
+        // 标题行（bold）用 text + style 加粗（客户端实测渲染正常）；空行保持 text（md 空元素不渲染空白行）；
+        // 内容行用 md 元素让飞书原生渲染 markdown（与 agent 回复一致：加粗/代码/链接/标题生效；text 元素会原样显示 markdown 符号）
+        if (row.bold) return [{ tag: 'text', text: row.text, style: ['bold'] }];
+        if (row.text === '') return [{ tag: 'text', text: '' }];
+        return [{ tag: 'md', text: row.text }];
+      });
       const sent = await sendChat(ctx, chatId, { post: { zh_cn: { title: '', content } } });
       sentMessageId = sent.messageId;
       sentCount = selected.length;
