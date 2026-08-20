@@ -9,6 +9,7 @@ import { appId, appSecret, CHANNEL_DEDUP_TTL_MS, defaultWorkspace, stateRoot } f
 import type { BackgroundTask, CommandTask, PendingEntry } from './types.js';
 import type { AppContext } from './app-context.js';
 import { AgentRunManager } from './agent/run-manager.js';
+import { createSendImageExecutor } from './agent/send-image.js';
 import { SessionSyncWatcher } from './sync/watcher.js';
 import { handleMessage, handleBotAdded } from './lark/messages.js';
 import { handleCardAction } from './lark/card-actions.js';
@@ -37,6 +38,8 @@ const channel = createLarkChannel({
   safety: { chatQueue: { enabled: false }, dedup: { ttl: CHANNEL_DEDUP_TTL_MS } },
   includeRawEvent: true,
 });
+// send_image 工具执行器注入：channel 创建后装配，供 Agent 发送图片到飞书对话
+pi.setSendImage(createSendImageExecutor(channel));
 
 // ── 组装点：构造 ctx（agentRuns / sessionSyncWatcher 先占位回填），attach 打破循环依赖 ──
 const ctx: AppContext = {

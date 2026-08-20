@@ -59,3 +59,9 @@ export const LARK_API_TIMEOUT_MS = 15_000;
 export const MEDIA_IMAGE_INJECT_LIMIT = 10 * 1024 * 1024;
 /** 纯附件类消息类型：到达时不进 agent（贴纸静默；其余回轻提示），且其 content 为 normalize 占位 */
 export const ATTACHMENT_MESSAGE_TYPES = new Set(['image', 'file', 'audio', 'video', 'sticker']);
+
+// ── Agent 发送图片（send_image 工具）──
+/** 单张图片大小上限：对齐飞书上传图片接口（im/v1/images）10MB 上限 */
+export const SEND_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+/** URL 图片来源下载超时（本地路径无此约束） */
+export const SEND_IMAGE_DOWNLOAD_TIMEOUT_MS = 15_000;

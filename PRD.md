@@ -66,6 +66,16 @@
 - 获取失败（`fetchMessage` 抛错）或内容为空 → **不进入 agent 流程**（不建 run、不设 `inFlightFeishuRun`），以 markdown 回复固定原因「无法读取被引用的消息。」（错误码 1069307 无权限时给专门提示），内部错误详情只进日志。
 - 边界：引用消息过长时注入截断版本并标注。
 
+**Agent 发送图片（send_image）**
+
+- Agent 在对话过程中可调用 `send_image` 工具，把一张图片作为**独立图片消息**发送到当前飞书对话（可放大 / 保存 / 转发），并继续用文字说明图片内容。
+- **注册**：`AgentSessionConfig.customTools`（SDK 层、进程内，按 session 闭包捕获 sessionFile / cwd）；主会话 / 话题会话 / 快速提问会话统一注册。工具不写 session JSONL（图片消息不进入对话上下文、不参与电脑端同步），也不渗透到电脑端独立启动的 pi agent（电脑端无此工具）。
+- **参数**：`target` = 本地图片文件路径（绝对或相对工作目录，**不限制路径范围**，但拒绝敏感文件）或 http(s) 图片 URL；单张 ≤10MB（`SEND_IMAGE_MAX_BYTES`，对齐飞书上传图片接口上限），URL 下载超时 15s（`SEND_IMAGE_DOWNLOAD_TIMEOUT_MS`）。
+- **敏感文件拒绝**：本地路径命中黑名单（`.env` 系列、`*.pem` / `*.key` / `*.p12` / `*.pfx`、SSH 私钥名 `id_rsa` 等、任意位置 `.ssh` 目录）时拒绝发送（`isSensitiveLocalPath` 纯函数），缓解 prompt injection 诱导 Agent 外泄凭据的风险；正常图片产物不受影响。
+- **发送目标反查**：pi 按 sessionFile 记录当前活跃 run 的 `chatId` + 状态卡 `messageId`（per-session 串行锁保证同一时刻每 sessionFile 至多一个活跃 run，多群共享 session 时也唯一）；图片消息 `replyTo` 状态卡（话题内状态卡在话题窗口 → 图片保持在话题窗口内）。
+- **发送链路**：读本地文件 / 下载 URL → Buffer → `channel.send(chatId, { image: { source: Buffer } }, { replyTo })`。Buffer source 不触发 `outbound.allowedFileDirs` 限制；channel 内部上传 `im/v1/images` 后发独立 `image` 消息。
+- **失败兜底**：文件不存在 / 路径非文件 / 大小超限 / 下载失败 / 上传失败 / 无活跃 run → 工具结果返回错误文本给 Agent（Agent 在回复中说明），不阻塞本次 prompt。
+
 **话题窗口（thread）**
 
 - 飞书「创建话题」后，话题窗口中的消息事件与原会话共享 `chat_id`、额外带 `thread_id`；话题窗口不是独立 chat，但对话归属**独立 session**（不 fork、不继承主会话历史）。
@@ -268,7 +278,7 @@ lark-agent-os（单进程 + 实例锁）
 
 ## 4. 依赖与权限
 
-- 飞书应用：启用机器人消息事件（WebSocket）；`im:chat`（建群）；群公告 Docx API 需在群内且具公告编辑权限（群主 / 管理员限定群需额外权限）。
+- 飞书应用：启用机器人消息事件（WebSocket）；`im:chat`（建群）；`im:resource`（获取与上传图片或文件资源，`send_image` 工具上传图片依赖）；群公告 Docx API 需在群内且具公告编辑权限（群主 / 管理员限定群需额外权限）。
 - pi SDK：读取本机 `~/.pi/agent` 的 provider / model / auth 配置。
 - pi 扩展：飞书会话与 pi CLI 共享用户级扩展（`~/.pi/agent/settings.json` 的 `packages`，如 pi-mcp-adapter / pi-web-access / pi-subagents）；会话打开时 `bindExtensions` 触发 `session_start` 初始化（否则 pi-mcp-adapter 不启动、`mcp` 工具调用返回 "MCP not initialized"），释放时发 `session_shutdown` 清理。
 - 命令执行：shell 平台感知（`resolveShell`）——Windows `cmd.exe /d /s /c`（前置 `chcp 65001`，对 cmd 内建管道输出无效，内建中文经逐行双解码 `decodeCommandLine` 还原，仅 Windows 启用）、POSIX `$SHELL`（默认 `/bin/sh`，输出直接 UTF-8 透传）。
@@ -288,4 +298,5 @@ lark-agent-os（单进程 + 实例锁）
 9. 后台任务不持久化（服务重启后不恢复，仅关闭时清理）。
 10. `checker` 组件需飞书客户端 V7.9+（低版本显示占位）。
 11. 每会话独立 MCP runtime（与 pi CLI 一致）：server 懒连接按需 spawn 进程，LRU 上限 32 个会话可共存多份同款进程，会话淘汰 / 服务关闭时经 `session_shutdown` 清理。
+12. `send_image` 工具的 URL 来源仅限 http(s)，下载不设 SSRF 过滤（信任 Agent，仅限协议 + 大小 / 超时）；本地路径不限制工作目录，但拒绝敏感文件（`.env` / 私钥 / 证书 / `.ssh` 目录，见 2.1「Agent 发送图片」），降低 prompt injection 外泄凭据风险。
 12. 扩展工具面：`mcp` / `web_search` / `subagent` 等扩展工具对可私聊机器人的成员（`dmMode: 'open'`）可用，`~/.pi/agent/mcp.json` 中 server 的内嵌凭据（如 figma API key）随之暴露给对话方；如需限制可配置适配器 `approveTools` 或收紧 bot 可见范围。

@@ -186,6 +186,9 @@ export class AgentRunManager {
         runId: run.id,
         isCancelled: () => run.stopRequested,
         images: run.images,
+        // send_image 工具反查发送目标（chatId）与 replyTo 目标（状态卡 messageId）
+        chatId: run.chatId,
+        messageId: run.messageId,
         onBeforeEntryIds: async (entryIds) => {
           run.originBefore = new Set(entryIds);
           this.ctx.state.update(run.chatId, {
