@@ -21,6 +21,9 @@ export const piAutoRetryMaxRetries = nonNegativeIntegerEnv('LARK_PI_RETRY_MAX_RE
 
 export const COMMAND_OUTPUT_LIMIT = 30_000;
 export const COMMAND_CARD_OUTPUT_LIMIT = 6_000;
+export const SESSION_TITLE_MAX_LENGTH = 48;
+export const CARD_MARKDOWN_LIMIT = 6_000;
+export const SESSION_PICKER_LIMIT = 10;
 export const COMMAND_CARD_UPDATE_INTERVAL_MS = 750;
 /** 命令最终卡：输出超过该字符数时折叠为「首屏预览 + 默认收起的面板」，避免超长代码块撑满卡片 */
 export const COMMAND_FOLD_THRESHOLD = 2_000;

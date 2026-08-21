@@ -1,11 +1,50 @@
 import type { SessionInfo } from '@earendil-works/pi-coding-agent';
 import type { PiModelOption } from './pi.js';
-import { COMMAND_FOLD_PREVIEW_LIMIT, COMMAND_FOLD_THRESHOLD } from './config.js';
+import { CARD_MARKDOWN_LIMIT, COMMAND_FOLD_PREVIEW_LIMIT, COMMAND_FOLD_THRESHOLD, SESSION_PICKER_LIMIT, SESSION_TITLE_MAX_LENGTH } from './config.js';
 import { escapeCommand, formatTimestamp, markdownCodeBlock } from './utils/format.js';
 
-const SESSION_TITLE_MAX_LENGTH = 48;
-const CARD_MARKDOWN_LIMIT = 6_000;
-const SESSION_PICKER_LIMIT = 10;
+/** 卡片操作命令（cmd 值）：构建端（cards.ts）与解析端（card-actions.ts）共用的契约类型 */
+export type CardCommand =
+  | 'help' | 'help.open' | 'command.form' | 'quickAsk.form' | 'command.submit' | 'quickAsk.submit'
+  | 'agent.stop' | 'command.stop' | 'project.create.form' | 'project.create.submit'
+  | 'project.bind.form' | 'project.bind.submit' | 'bgTask.form' | 'bgTask.stop'
+  | 'session.new.form' | 'session.resume.form' | 'model.form' | 'thinkingLevel.form'
+  | 'session.sync.form' | 'session.sync.submit' | 'session.rename.form' | 'session.compact'
+  | 'config.reload' | 'model.select' | 'thinkingLevel.select' | 'session.rename.submit'
+  | 'session.create.submit' | 'session.use';
+
+/** 无参数命令（其余命令携带按钮参数，见 CardButtonValue） */
+type NoParamCommand = Exclude<
+  CardCommand,
+  'agent.stop' | 'command.stop' | 'bgTask.stop' | 'project.create.submit' | 'project.bind.submit' | 'model.select' | 'thinkingLevel.select' | 'session.use'
+>;
+
+/** 卡片按钮回调值（cmd + 参数）：按 cmd 收窄，参数错配编译期拦截 */
+export type CardButtonValue =
+  | { cmd: NoParamCommand }
+  | { cmd: 'agent.stop' | 'command.stop' | 'bgTask.stop'; taskId: string }
+  | { cmd: 'project.create.submit' | 'project.bind.submit'; baseCwd: string }
+  | { cmd: 'model.select'; provider: string; modelId: string }
+  | { cmd: 'thinkingLevel.select'; thinkingLevel: string }
+  | { cmd: 'session.use'; sessionFile: string };
+
+/** 卡片表单契约：表单名 → 可提交字段；字段均可缺失，handler 在信任边界自行校验必填项。 */
+export type CardFormValues = {
+  command_form: { command?: string; timeoutSeconds?: string; isBackground?: boolean };
+  quick_ask_form: { prompt?: string };
+  project_create_form: { name?: string; cwd?: string };
+  project_bind_form: { cwd?: string };
+  session_create_form: { name?: string };
+  session_sync_form: { count?: string };
+  session_name_form: { name?: string };
+};
+export type CardFormName = keyof CardFormValues;
+
+/** 类型化的 callback behaviors（value 受 CardButtonValue 约束；契约一处定义、两端共用） */
+export function callbackValue(value: CardButtonValue): { type: 'callback'; value: CardButtonValue } {
+  return { type: 'callback', value };
+}
+
 /** 压缩会话的二次确认文案（help 群模式 / 话题模式共用，改文案只需改此处） */
 const COMPACT_CONFIRM = { title: '确认压缩会话？', text: '压缩将丢弃较早的对话上下文并合并为摘要，不可撤销。若 Agent 正在处理，将等其完成后再压缩。确定继续吗？' };
 
@@ -48,7 +87,7 @@ export function sessionPickerCard(cwd: string, sessions: SessionInfo[]): object 
           tag: 'button',
           text: { tag: 'plain_text', content: `${sessionDisplayName(session)} · ${session.messageCount} 条` },
           type: 'primary',
-          behaviors: [{ type: 'callback', value: { cmd: 'session.use', sessionFile: session.path } }],
+          behaviors: [callbackValue({ cmd: 'session.use', sessionFile: session.path })],
         })),
       ],
     },
@@ -66,7 +105,7 @@ export function createSessionFormCard(): object {
           name: 'session_create_form',
           elements: [
             { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '会话名称' }, placeholder: { tag: 'plain_text', content: '例如：修复登录超时' }, required: true },
-            { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '新建会话' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.create.submit' } }] },
+            { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '新建会话' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'session.create.submit' })] },
           ],
         },
       ],
@@ -80,7 +119,7 @@ export function syncFormCard(): object {
     config: { summary: { content: '同步消息' } },
     body: { elements: [{ tag: 'form', name: 'session_sync_form', elements: [
       { tag: 'input', name: 'count', label: { tag: 'plain_text', content: '同步最新轮数（可选）' }, placeholder: { tag: 'plain_text', content: '留空同步全部新消息' } },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '同步' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.sync.submit' } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '同步' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'session.sync.submit' })] },
     ] }] },
   };
 }
@@ -91,7 +130,7 @@ export function renameSessionFormCard(): object {
     config: { summary: { content: '重命名会话' } },
     body: { elements: [{ tag: 'form', name: 'session_name_form', elements: [
       { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '会话名称' }, required: true },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '保存' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'session.rename.submit' } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '保存' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'session.rename.submit' })] },
     ] }] },
   };
 }
@@ -104,7 +143,7 @@ export function modelPickerCard(models: PiModelOption[]): object {
       { tag: 'markdown', content: '**选择 Provider / Model**' },
       ...models.map((model) => ({
         tag: 'button', text: { tag: 'plain_text', content: `${model.provider} / ${model.name}` }, type: 'primary',
-        behaviors: [{ type: 'callback', value: { cmd: 'model.select', provider: model.provider, modelId: model.id } }],
+        behaviors: [callbackValue({ cmd: 'model.select', provider: model.provider, modelId: model.id })],
       })),
     ] },
   };
@@ -118,7 +157,7 @@ export function thinkingLevelPickerCard(thinkingLevels: string[]): object {
       { tag: 'markdown', content: '**选择当前 model 的思考强度**' },
       ...thinkingLevels.map((thinkingLevel) => ({
         tag: 'button', text: { tag: 'plain_text', content: thinkingLevel }, type: 'primary',
-        behaviors: [{ type: 'callback', value: { cmd: 'thinkingLevel.select', thinkingLevel } }],
+        behaviors: [callbackValue({ cmd: 'thinkingLevel.select', thinkingLevel })],
       })),
     ] },
   };
@@ -127,7 +166,7 @@ export function thinkingLevelPickerCard(thinkingLevels: string[]): object {
 export function agentQueuedCard(taskId: string, prompt: string): object {
   return { schema: '2.0', config: { summary: { content: 'Agent 等待处理' } }, body: { elements: [
     { tag: 'markdown', content: limitedMarkdown(`**Agent 等待处理**\n\n请求：${escapeCommand(prompt)}\n\n状态：排队中`) },
-    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [{ type: 'callback', value: { cmd: 'agent.stop', taskId } }] },
+    { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger', behaviors: [callbackValue({ cmd: 'agent.stop', taskId })] },
   ] } };
 }
 
@@ -137,7 +176,7 @@ export function agentRunningCard(taskId: string, prompt: string, output?: string
     { tag: 'markdown', content: limitedMarkdown(`**Agent 正在处理**\n\n请求：${escapeCommand(prompt)}\n\n状态：执行中${response}`) },
     { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger',
       confirm: confirmDialog('确认停止 Agent？', '将中止当前处理，已生成的内容可能不完整。确定停止吗？'),
-      behaviors: [{ type: 'callback', value: { cmd: 'agent.stop', taskId } }] },
+      behaviors: [callbackValue({ cmd: 'agent.stop', taskId })] },
   ] } };
 }
 
@@ -182,12 +221,12 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
     ? (bound ? '\n\n话题固定使用该工作路径，不支持修改。' : '\n\n此群尚未绑定项目，请先绑定。\n\n话题固定使用该工作路径，不支持修改。')
     : bound ? '' : '\n\n此群尚未绑定项目，请先绑定。';
   const sessionStatus = mode === 'topic' ? '' : (hasSession ? '' : '\n\n尚未选择会话，请使用「新建会话」或「切换会话」。');
-  const button = (label: string, cmd: string, confirm?: { title: string; text: string }) => ({
+  const button = (label: string, cmd: NoParamCommand, confirm?: { title: string; text: string }) => ({
     tag: 'button',
     text: { tag: 'plain_text', content: label },
     type: 'primary',
     ...(confirm ? { confirm: confirmDialog(confirm.title, confirm.text) } : {}),
-    behaviors: [{ type: 'callback', value: { cmd } }],
+    behaviors: [callbackValue({ cmd })],
   });
   // 话题模式去掉：新建会话 / 切换会话 / 绑定项目 / 同步消息（话题 = 独立 session，无手动会话管理；话题 session 不参与同步）
   const sessionRowButtons = mode === 'topic'
@@ -213,7 +252,7 @@ export function helpCard(cwd: string, bound: boolean, hasSession: boolean, mode:
 export function botWelcomeCard(cwd: string): object {
   return { schema: '2.0', config: { summary: { content: '机器人已加入群聊' } }, body: { elements: [
     { tag: 'markdown', content: `**机器人已就绪**\n\n已自动绑定工作路径：\`${cwd}\`\n\n在群里 \`@机器人\` 即可开始对话；\`/help\` 或下方按钮打开操作面板（新建/切换会话、执行命令、修改绑定等）。` },
-    { tag: 'button', text: { tag: 'plain_text', content: '打开操作面板' }, type: 'primary', behaviors: [{ type: 'callback', value: { cmd: 'help' } }] },
+    { tag: 'button', text: { tag: 'plain_text', content: '打开操作面板' }, type: 'primary', behaviors: [callbackValue({ cmd: 'help.open' })] },
   ] } };
 }
 
@@ -228,7 +267,7 @@ export function commandFormCard(cwd: string, isWindows: boolean): object {
       { tag: 'input', name: 'command', label: { tag: 'plain_text', content: '命令' }, placeholder: { tag: 'plain_text', content: 'pnpm test' } },
       { tag: 'input', name: 'timeoutSeconds', label: { tag: 'plain_text', content: '超时（秒，可选）' }, placeholder: { tag: 'plain_text', content: '默认 10 秒，可修改或清空（清空则不自动停止）' }, default_value: '10' },
       { tag: 'checker', name: 'isBackground', text: { tag: 'plain_text', content: '常驻任务（忽略超时，后台持续运行）' }, checked: false },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '执行' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'command.submit' } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '执行' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'command.submit' })] },
     ] },
   ] } };
 }
@@ -238,7 +277,7 @@ export function askFormCard(cwd: string): object {
     { tag: 'markdown', content: `**快速提问**\n\n工作路径：\`${cwd}\`\n\n无上下文关联的一次性提问，不会写入当前会话、不影响对话上下文。` },
     { tag: 'form', name: 'quick_ask_form', elements: [
       { tag: 'input', name: 'prompt', label: { tag: 'plain_text', content: '问题' }, placeholder: { tag: 'plain_text', content: '例如：这个项目如何启动？' }, required: true },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '提问' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'quickAsk.submit' } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '提问' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'quickAsk.submit' })] },
     ] },
   ] } };
 }
@@ -255,7 +294,7 @@ export function commandRunningCard(taskId: string, command: string, cwd: string,
     { tag: 'markdown', content: limitedMarkdown(`**命令正在执行**\n\n\`$ ${escapeCommand(command)}\`\n工作路径：\`${cwd}\`\n状态：执行中${timeout}${latestOutput}`) },
     { tag: 'button', text: { tag: 'plain_text', content: '停止' }, type: 'danger',
       confirm: confirmDialog('确认停止命令？', '将终止正在执行的命令进程。确定停止吗？'),
-      behaviors: [{ type: 'callback', value: { cmd: 'command.stop', taskId } }] },
+      behaviors: [callbackValue({ cmd: 'command.stop', taskId })] },
   ] } };
 }
 
@@ -291,7 +330,7 @@ export function createProjectFormCard(baseCwd: string): object {
     { tag: 'form', name: 'project_create_form', elements: [
       { tag: 'input', name: 'name', label: { tag: 'plain_text', content: '群名称' }, placeholder: { tag: 'plain_text', content: 'Pi · 项目名称' } },
       { tag: 'input', name: 'cwd', label: { tag: 'plain_text', content: '工作路径' }, placeholder: { tag: 'plain_text', content: '~/Codes/my-project 或 ../my-project' }, required: true },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '创建项目群' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'project.create.submit', baseCwd } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: '创建项目群' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'project.create.submit', baseCwd })] },
     ] },
   ] } };
 }
@@ -304,7 +343,7 @@ export function bgTaskListCard(tasks: Array<{ id: string; command: string; start
     const label = task.command.length > 16 ? `${task.command.slice(0, 16)}…` : task.command;
     return { tag: 'button', text: { tag: 'plain_text', content: `停止：${label}` }, type: 'danger',
       confirm: confirmDialog('确认停止任务？', '该后台任务将立即终止，无法恢复。确定停止吗？'),
-      behaviors: [{ type: 'callback', value: { cmd: 'bgTask.stop', taskId: task.id } }] };
+      behaviors: [callbackValue({ cmd: 'bgTask.stop', taskId: task.id })] };
   });
   return { schema: '2.0', config: { summary: { content: '后台任务' } }, body: { elements: [header, ...(stopButtons.length > 0 ? [{ tag: 'hr' }, ...stopButtons] : [])] } };
 }
@@ -315,7 +354,7 @@ export function bindProjectFormCard(baseCwd: string, bound: boolean): object {
     { tag: 'markdown', content: `**${title}**\n\n将当前群绑定到工作路径。相对路径将以当前工作路径 \`${baseCwd}\` 为基准；支持绝对路径和 \`~/...\`；工作路径必须已存在且为目录。` },
     { tag: 'form', name: 'project_bind_form', elements: [
       { tag: 'input', name: 'cwd', label: { tag: 'plain_text', content: '工作路径' }, placeholder: { tag: 'plain_text', content: '~/Codes/my-project 或 ../my-project' }, required: true },
-      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: bound ? '保存绑定' : '绑定项目' }, type: 'primary', form_action_type: 'submit', behaviors: [{ type: 'callback', value: { cmd: 'project.bind.submit', baseCwd } }] },
+      { tag: 'button', name: 'submit', text: { tag: 'plain_text', content: bound ? '保存绑定' : '绑定项目' }, type: 'primary', form_action_type: 'submit', behaviors: [callbackValue({ cmd: 'project.bind.submit', baseCwd })] },
     ] },
   ] } };
 }
